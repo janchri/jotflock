@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ecae8597a7494f3cfacca327daf31c0820a456ff36376ac1f2642eab1b045125 # shrinks to label = ""
+cc 898a2158260a74b2d2309f87002466d6b10c68384228ba2bbf6a9edb53ef3194 # shrinks to x = -3.4028235e38, target = 3.4028235e38, shape = 0
+cc 774a2b1699d55f062e9cb2abafa6a920e417eddd62e52744d69798ee6a04f78d # shrinks to ops = [(1, Text(22, "🙂🙂\u{7f}\u{9a026}é\u{7f734}éé中:🙂中éé")), (1, Shape(85, 2)), (0, Text(185, "é中é中🙂éé🙂\0aé🙂🙂é\ré🙂中")), (2, Reload), (1, Reload), (1, Label(48, "BÆ🙂🙂x\u{feff}Ѩ")), (0, Add(2, -428, -650, "中é")), (1, Shape(72, 0)), (1, Resize(145, 323, 1136)), (2, Reload), (0, DeleteEdge(66)), (0, Shape(89, 0)), (2, Reparent(98)), (1, Delete(115)), (2, Label(2, "ééé🙂\u{ae6c5}é\u{c2332}$中🙂🙂")), (2, Reparent(138)), (0, Connect(106, 134)), (0, Add(3, -170, 843, "中中🙂🙂\u{f8b3d}🙂中中中中中\u{63bd7}Ⱥ🙂中\u{102a1f}中")), (0, Reparent(58)), (0, Text(179, "é🙂🙂中\u{95fa4}'éé中中A中é🙂é")), (2, Reload), (0, Resize(4, 1352, 1189)), (1, Text(48, "é中é🙂éé🙂中éé中é🙂é")), (0, Reparent(241)), (2, Reparent(249)), (0, Shape(250, 0)), (1, Reparent(87)), (2, Connect(183, 15)), (0, Connect(87, 25))], reversed = false

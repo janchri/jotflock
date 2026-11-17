@@ -1,0 +1,8 @@
+# Rust builds and rustfmt backups
+/target/
+*.rs.bk
+
+# Linux packages and extracted bundles
+*.AppImage
+*.AppDir/
+/squashfs-root/
