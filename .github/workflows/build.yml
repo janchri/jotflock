@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux AppImage
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxft-dev libxext-dev \
+            libgl1-mesa-dev
+      - name: Install linuxdeploy
+        run: |
+          curl -L https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o linuxdeploy
+          curl -L https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage -o linuxdeploy-plugin-appimage
+          chmod +x linuxdeploy linuxdeploy-plugin-appimage
+          echo "$PWD" >> "$GITHUB_PATH"
+      - name: Build AppImage
+        run: ./package-appimage.sh
+        env:
+          LINUXDEPLOY: ./linuxdeploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jotflock-linux-x86_64
+          path: jotflock-x86_64.AppImage
+          if-no-files-found: error
+
+  windows:
+    name: Windows portable executable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build executable
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jotflock-windows-x86_64
+          path: target/release/jotflock.exe
+          if-no-files-found: error
