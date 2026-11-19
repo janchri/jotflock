@@ -133,38 +133,81 @@ pub struct Network {
     presence: tokio::sync::watch::Sender<Presence>,
 }
 impl Network {
-    pub fn start(root: PathBuf) -> Self {
+    pub fn start(root: Option<PathBuf>) -> Self {
         let (tx, mut rx) = channel::channel(8);
         let (events, receiver) = mpsc::sync_channel(8);
         let (presence, presence_rx) = tokio::sync::watch::channel(Presence::default());
-        std::thread::spawn(move || {
-            let failures = events.clone();
-            let run = || -> Result<()> {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()?;
-                runtime.block_on(async move{
-                    let hub=Hub::new(root,events.clone(),false).await?;let accepting=hub.clone();let accept=tokio::spawn(async move{accepting.accept().await;});
-                    let mut tick=tokio::time::interval(Duration::from_millis(300));
-                    loop{tokio::select!{
-                        command=rx.recv()=>{let Some(command)=command else{break;};let starting=match &command{Command::Share{epoch,..}|Command::Join{epoch,..}=>Some(*epoch),_=>None};let result=match command{
-                            Command::Share{epoch,bytes}=>hub.share(epoch,bytes).await,
-                            Command::Join{epoch,ticket,local}=>hub.join(epoch,*ticket,local).await,
-                            Command::Publish(bytes)=>hub.publish(bytes).await,
-                            Command::Invite=>hub.invitation().await.map(|_|()),
-                            Command::Refresh=>{if let Some(room)=hub.room.read().await.clone(){room.last_heads.lock().await.clear();}Ok(())},
-                            Command::Stop=>{hub.stop().await;Ok(())},Command::Shutdown=>break,
-                        };if let Err(error)=result{let epoch=starting.unwrap_or(hub.room.read().await.as_ref().map(|r|r.epoch).unwrap_or(0));if starting.is_some(){hub.stop().await;}let _=events.try_send(Event::Failed(epoch,format!("Sharing error: {error}"),starting.is_some()));}},
-                        _=tick.tick()=>{let current=presence_rx.borrow().clone();*hub.presence.write().await=current;hub.maintain().await;},
-                    }}
-                    hub.stop().await;accept.abort();hub.endpoint.close().await;Ok::<_,anyhow::Error>(())
-                })
-            };
-            if let Err(error) = run() {
-                let _ = failures.try_send(Event::Fatal(format!("Networking unavailable: {error}")));
-            }
-        });
+        if let Some(root) = root {
+            std::thread::spawn(move || {
+                let failures = events.clone();
+                let run = || -> Result<()> {
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(async move {
+                        let hub = Hub::new(root, events.clone(), false).await?;
+                        let accepting = hub.clone();
+                        let accept = tokio::spawn(async move { accepting.accept().await });
+                        let mut tick = tokio::time::interval(Duration::from_millis(300));
+                        loop {
+                            tokio::select! {
+                                command = rx.recv() => {
+                                    let Some(command) = command else { break };
+                                    let starting = match &command {
+                                        Command::Share { epoch, .. } | Command::Join { epoch, .. } => Some(*epoch),
+                                        _ => None,
+                                    };
+                                    let result = match command {
+                                        Command::Share { epoch, bytes } => hub.share(epoch, bytes).await,
+                                        Command::Join { epoch, ticket, local } => hub.join(epoch, *ticket, local).await,
+                                        Command::Publish(bytes) => hub.publish(bytes).await,
+                                        Command::Invite => hub.invitation().await.map(|_| ()),
+                                        Command::Refresh => {
+                                            if let Some(room) = hub.room.read().await.clone() {
+                                                room.last_heads.lock().await.clear();
+                                            }
+                                            Ok(())
+                                        }
+                                        Command::Stop => {
+                                            hub.stop().await;
+                                            Ok(())
+                                        }
+                                        Command::Shutdown => break,
+                                    };
+                                    if let Err(error) = result {
+                                        let epoch = starting.unwrap_or(
+                                            hub.room.read().await.as_ref().map(|r| r.epoch).unwrap_or(0)
+                                        );
+                                        if starting.is_some() {
+                                            hub.stop().await;
+                                        }
+                                        let _ = events.try_send(Event::Failed(
+                                            epoch,
+                                            format!("Sharing error: {error}"),
+                                            starting.is_some(),
+                                        ));
+                                    }
+                                }
+                                _ = tick.tick() => {
+                                    let current = presence_rx.borrow().clone();
+                                    *hub.presence.write().await = current;
+                                    hub.maintain().await;
+                                }
+                            }
+                        }
+                        hub.stop().await;
+                        accept.abort();
+                        hub.endpoint.close().await;
+                        Ok(())
+                    })
+                };
+                if let Err(error) = run() {
+                    let _ =
+                        failures.try_send(Event::Fatal(format!("Networking unavailable: {error}")));
+                }
+            });
+        }
         Self {
             tx,
             events: receiver,

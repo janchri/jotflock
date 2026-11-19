@@ -14,10 +14,13 @@ future capabilities as planned rather than presenting them as implemented.
 - [0006 — Authenticated iroh sessions](0006-authenticated-iroh-sessions.md)
 - [0007 — Home and canvas](0007-home-and-canvas.md)
 - [0008 — Jotflock project identity](0008-jotflock-identity.md)
+- [0009 — Application commands and headless mode](0009-command-interface.md)
 
 ## Runtime and modules
 
-`main.rs` owns the eframe application, board library, panels and save feedback.
+`main.rs` owns the shared desktop and headless application lifecycle, board
+library, panels and save feedback. `command.rs` parses and dispatches commands.
+`terminal.rs` renders the command bar and keeps recent commands and responses.
 `interface.rs` owns typography, icons, adaptive dialogs and board previews.
 Board titles and object text can be edited in place. The drawing rail stays
 visible and selection properties open on demand.
@@ -30,8 +33,8 @@ contains GUI-independent world-space bounds, connector anchors and hit testing.
 `templates.rs` composes useful layouts; `story_map.rs` derives structured placement
 from stable activity/release identities. `sharing.rs` owns signed membership and
 invitations; `network.rs` owns the Tokio worker, authenticated iroh mesh and bounded
-synchronization. `desktop.rs` owns single-instance forwarding and explicit Linux URL
-registration.
+synchronization. `desktop.rs` owns the profile lock, Unix command socket,
+single-instance invitation forwarding and Linux URL registration.
 `property_tests.rs` is compiled only for tests and exercises generated document,
 replica and workspace sequences against the invariants in ADR 0003. Synthetic
 compatibility bytes live in `tests/fixtures/`; failing-input seeds are retained in
@@ -39,7 +42,10 @@ compatibility bytes live in `tests/fixtures/`; failing-input seeds are retained 
 
 ```mermaid
 flowchart TD
-    App[Desktop application] --> Workspace[Board lifecycle]
+    Terminal[Command bar] --> Commands[Application commands]
+    Shell[Shell CLI] --> Commands
+    Commands --> App[Desktop or headless application]
+    App --> Workspace[Board lifecycle]
     App --> Scene[Canvas scene and inspector]
     App --> Templates[Templates and story layout]
     App --> Network[Background iroh session]
@@ -101,5 +107,6 @@ See ADR 0003 for exact scopes and the remaining filesystem transaction limitatio
 Linux builds produce an AppImage using `package-appimage.sh`. Generated tests,
 headless egui interaction tests, focused regressions, compatibility checks,
 real multi-endpoint iroh tests, explicit relay-only verification, formatting,
-Clippy and release packaging are the current checks. No formal proof
-has been introduced. Live desktop and cross-distribution testing remain pending.
+Clippy and release packaging are the current checks. Desktop command parity
+and synchronization between two headless instances were checked on Linux.
+Cross-distribution testing remains pending.

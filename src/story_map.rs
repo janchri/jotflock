@@ -3,14 +3,15 @@
 use crate::document::{Board, Card, Kind};
 use anyhow::{anyhow, ensure, Result};
 use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Slot {
     pub column: String,
     pub lane: String,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Axes {
     pub columns: Vec<String>,
     pub lanes: Vec<String>,

@@ -54,6 +54,56 @@ Close boards with **Close board** in board settings. They remain in Saved
 boards and can be reopened; open/closed state survives restart. Delete moves a board
 into recoverable local `trash/` after confirmation.
 
+## Command bar and CLI
+
+The floating white command bar is available on Home and in the editor. Press
+**Ctrl+K** to focus it, type `help`, and press **Enter**. Use the arrow button to
+see recent commands and results. **↑** and **↓** recall commands, including
+commands recorded when you create, move, resize or edit an object with the GUI.
+`history` reads the recent command list from a running instance.
+
+Use the same words in a shell with `jotflock cli`. Use the full executable path
+or the AppImage filename if Jotflock is outside your PATH.
+
+```sh
+jotflock cli board list
+jotflock cli board open BOARD_ID
+jotflock cli object add sticky 80 120 "Plan the release"
+jotflock cli object text CARD_ID "Review the release plan"
+jotflock cli view fit
+jotflock cli history
+```
+
+Coordinates in object commands are canvas world coordinates. `view pan` uses
+screen points. The optional anchor for `view zoom` uses points relative to the
+canvas top left. IDs come from creation results, `board list`, `object list`
+or `story axes FRAME_ID`. Story axis indices begin at zero. In the command
+bar, use single quotes for literal text or double quotes for JSON escapes such
+as `\n`. In a shell, use its usual argument quoting.
+
+CLI responses are one JSON object per call. Success returns
+`{"ok":true,"result":...}`. Failure returns `{"ok":false,"error":"..."}`
+and exits with code 1.
+
+### Run without a window
+
+```sh
+JOTFLOCK_DATA_DIR=/path/to/profile jotflock --headless
+```
+
+Run CLI calls in another terminal with the same `JOTFLOCK_DATA_DIR`. On Unix
+the CLI talks to the Jotflock process that owns that profile, whether desktop or
+headless. Shell edits are reflected in the open desktop window. If the profile
+has no running process, individual local commands open, update and save it
+without a display. Keep a headless process running for live sharing or for
+view state and command history across calls. `jotflock cli quit` saves and exits
+the running process.
+
+For live sharing, use `share invite` or `share join LINK`, then read
+`share status` for progress, peers and the generated invitation. Invitations
+returned to shell clients are available in JSON. The GUI share button also
+copies the invitation to the system clipboard.
+
 ## Encrypted live collaboration
 
 1. On Home, click the share icon beside the board title, or choose **⋯ → Copy invitation**.
@@ -129,13 +179,10 @@ The external relay test is excluded from ordinary offline runs. Run it explicitl
 cargo test public_relay_only_synchronizes_encrypted_board -- --ignored --nocapture
 ```
 
-Current verification: 51 tests passed in the normal suite (64 cases per generated
-property); the explicit public-relay test passed separately. Formatting, Clippy with
-warnings denied and the Linux x86_64 AppImage build passed.
-
-It disables direct IP transport and asserts an encrypted connection actually uses
-the public relay. Live desktop interaction and testing across separate physical
-NAT/firewall setups and Linux distributions remain pending.
+The optional test disables direct IP transport and asserts that the connection
+uses the public relay. The command interface was also checked in the Linux
+desktop window and between two headless instances. Tests across separate
+physical NAT and firewall setups and Linux distributions remain pending.
 
 ## Build an AppImage
 

@@ -1,5 +1,94 @@
-//! Linux desktop URL integration and single-instance invitation forwarding.
+//! Profile lock, local commands and Linux invitation registration.
 use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+const REQUEST_LIMIT: u64 = 256 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Reply {
+    Success { ok: bool, result: Value },
+    Failure { ok: bool, error: String },
+}
+impl From<Result<Value>> for Reply {
+    fn from(result: Result<Value>) -> Self {
+        match result {
+            Ok(result) => Self::Success { ok: true, result },
+            Err(error) => Self::Failure {
+                ok: false,
+                error: format!("{error:#}"),
+            },
+        }
+    }
+}
+impl Reply {
+    pub fn ok(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+    pub fn pretty(&self) -> String {
+        match self {
+            Self::Success { result, .. } => {
+                serde_json::to_string_pretty(result).unwrap_or_default()
+            }
+            Self::Failure { error, .. } => error.clone(),
+        }
+    }
+}
+
+pub struct Request {
+    pub args: Vec<String>,
+    #[cfg(unix)]
+    stream: UnixStream,
+}
+impl Request {
+    pub fn respond(self, reply: &Reply) {
+        #[cfg(unix)]
+        let _ = write_reply(self.stream, reply);
+        #[cfg(not(unix))]
+        let _ = reply;
+    }
+}
+
+#[cfg(unix)]
+fn write_reply(mut stream: UnixStream, reply: &Reply) -> Result<()> {
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let bytes = serde_json::to_vec(reply)?;
+    stream.write_all(&bytes)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn request(stream: &mut UnixStream) -> Result<Vec<u8>> {
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut bytes = Vec::new();
+    stream.take(REQUEST_LIMIT + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= REQUEST_LIMIT, "Command is too large");
+    Ok(bytes)
+}
+
+pub fn send(root: &Path, args: &[String]) -> Result<Reply> {
+    #[cfg(unix)]
+    {
+        let bytes = serde_json::to_vec(args)?;
+        ensure!(bytes.len() as u64 <= REQUEST_LIMIT, "Command is too large");
+        let mut stream = UnixStream::connect(root.join("app.sock"))
+            .context("Cannot reach the active Jotflock instance for this data directory")?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.write_all(&bytes)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        serde_json::from_reader(stream)
+            .context("No valid command response from the active instance")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, args);
+        anyhow::bail!("Commands to a running instance require Unix sockets")
+    }
+}
 use std::{
     fs,
     io::{Read, Write},
@@ -9,6 +98,7 @@ use std::{
 };
 pub struct Instance {
     pub links: Receiver<String>,
+    pub commands: Receiver<Request>,
     _lock: fs::File,
 }
 pub fn instance(root: &Path, link: Option<&str>) -> Result<Option<Instance>> {
@@ -22,7 +112,6 @@ pub fn instance(root: &Path, link: Option<&str>) -> Result<Option<Instance>> {
     if lock.try_lock().is_err() {
         #[cfg(unix)]
         if let Some(link) = link {
-            use std::os::unix::net::UnixStream;
             let mut stream = UnixStream::connect(root.join("app.sock"))
                 .context("The app is starting; paste the invitation into its window")?;
             stream.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -32,9 +121,10 @@ pub fn instance(root: &Path, link: Option<&str>) -> Result<Option<Instance>> {
         return Ok(None);
     }
     let (tx, links) = mpsc::sync_channel(8);
+    let (command_tx, commands) = mpsc::sync_channel(8);
     #[cfg(unix)]
     {
-        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        use std::os::unix::fs::PermissionsExt;
         let socket = root.join("app.sock");
         if socket.exists() {
             fs::remove_file(&socket)?;
@@ -43,26 +133,40 @@ pub fn instance(root: &Path, link: Option<&str>) -> Result<Option<Instance>> {
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                let mut bytes = Vec::new();
-                if std::io::Read::by_ref(&mut stream)
-                    .take(128 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .is_ok()
-                    && bytes.len() <= 128 * 1024
-                {
+                let Ok(bytes) = request(&mut stream) else {
+                    continue;
+                };
+                if bytes.starts_with(crate::sharing::PREFIX.as_bytes()) {
                     if let Ok(link) = String::from_utf8(bytes) {
-                        if link.starts_with(crate::sharing::PREFIX) {
-                            let _ = tx.try_send(link);
+                        let _ = tx.try_send(link);
+                    }
+                    continue;
+                }
+                match serde_json::from_slice::<Vec<String>>(&bytes) {
+                    Ok(args) => {
+                        if let Err(error) = command_tx.try_send(Request { args, stream }) {
+                            let (mpsc::TrySendError::Full(request)
+                            | mpsc::TrySendError::Disconnected(request)) = error;
+                            request.respond(
+                                &Err(anyhow::anyhow!("Jotflock command queue is unavailable"))
+                                    .into(),
+                            );
                         }
+                    }
+                    Err(error) => {
+                        let _ = write_reply(stream, &Err(error.into()).into());
                     }
                 }
             }
         });
     }
     #[cfg(not(unix))]
-    drop(tx);
-    Ok(Some(Instance { links, _lock: lock }))
+    drop((tx, command_tx, link));
+    Ok(Some(Instance {
+        links,
+        commands,
+        _lock: lock,
+    }))
 }
 pub fn install() -> Result<()> {
     let data = directories::BaseDirs::new()

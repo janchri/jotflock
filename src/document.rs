@@ -13,6 +13,17 @@ pub enum Kind {
     Frame,
 }
 impl Kind {
+    pub const ALL: [Self; 4] = [Self::Sticky, Self::Component, Self::Text, Self::Frame];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Sticky => "sticky",
+            Self::Component => "component",
+            Self::Text => "text",
+            Self::Frame => "frame",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Sticky => "Sticky note",
@@ -30,7 +41,7 @@ impl Kind {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Card {
     pub id: String,
     pub text: String,
@@ -71,7 +82,7 @@ impl Card {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Connector {
     pub id: String,
     pub from: String,

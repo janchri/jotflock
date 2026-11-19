@@ -14,6 +14,8 @@ pub struct Action {
     pub edit: bool,
     pub finished_edit: bool,
     pub move_finished: bool,
+    pub resize_finished: bool,
+    pub text_changed: bool,
 }
 pub fn text_id(card: &Card) -> egui::Id {
     egui::Id::new((&card.id, "text"))
@@ -195,7 +197,8 @@ pub fn show(
                 .char_limit(8000)
                 .frame(false),
         );
-        action.changed |= field.changed();
+        action.text_changed = field.changed();
+        action.changed |= action.text_changed;
         action.finished_edit = field.lost_focus();
     } else {
         let label_hit = if card.text.is_empty() {
@@ -245,7 +248,7 @@ pub fn show(
             card.height = (card.height + delta.y).clamp(if is_frame { 180. } else { 80. }, 20_000.);
             action.changed = true;
         }
-        action.move_finished |= resize.drag_stopped_by(egui::PointerButton::Primary);
+        action.resize_finished = resize.drag_stopped_by(egui::PointerButton::Primary);
     }
     action
 }

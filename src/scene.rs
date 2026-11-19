@@ -1,11 +1,12 @@
 //! Canvas controller: transient UI state and document commands, never disk I/O.
 use crate::{
     card,
+    command::{self, Edit},
     document::{Board, Card, Kind},
     geometry::{segment_distance, Shape},
     interface::{icon_button, Icon},
 };
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 
 pub struct RemotePresence {
@@ -24,6 +25,7 @@ pub struct Scene {
     pub fit_on_show: bool,
     pub pointer: Option<[f32; 2]>,
     pub remote: Vec<RemotePresence>,
+    pub commands: Vec<String>,
 }
 impl Default for Scene {
     fn default() -> Self {
@@ -37,6 +39,7 @@ impl Default for Scene {
             fit_on_show: false,
             pointer: None,
             remote: vec![],
+            commands: vec![],
         }
     }
 }
@@ -48,15 +51,55 @@ impl Scene {
         self.editing = None;
         self.connecting = None;
     }
-    pub fn zoom_center(&mut self, factor: f32) {
-        self.zoom_at(self.viewport * 0.5, factor);
+    pub fn select(&mut self, id: Option<String>) {
+        self.selected = id;
+        self.cancel_edit();
     }
-    fn zoom_at(&mut self, anchor: Vec2, factor: f32) {
-        let next = (self.zoom * factor).clamp(0.1, 2.);
-        if next.is_finite() && next != self.zoom {
-            self.pan = anchor - (anchor - self.pan) * (next / self.zoom);
-            self.zoom = next;
+    fn select_gui(&mut self, id: Option<String>) {
+        if self.selected != id {
+            self.commands.push(match &id {
+                Some(id) => command::format(&["object", "select", id]),
+                None => "object select".into(),
+            });
+            self.select(id);
         }
+    }
+    pub fn zoom_center(&mut self, factor: f32) -> Result<bool> {
+        self.zoom_at(self.viewport * 0.5, factor)
+    }
+    pub fn zoom_at(&mut self, anchor: Vec2, factor: f32) -> Result<bool> {
+        let next = (self.zoom * factor).clamp(0.1, 2.);
+        if next == self.zoom {
+            return Ok(false);
+        }
+        let pan = anchor - (anchor - self.pan) * (next / self.zoom);
+        ensure!(
+            next.is_finite() && pan.x.is_finite() && pan.y.is_finite(),
+            "View is outside the coordinate range"
+        );
+        self.pan = pan;
+        self.zoom = next;
+        Ok(true)
+    }
+    pub fn pan_by(&mut self, delta: Vec2) -> Result<()> {
+        let next = self.pan + delta;
+        ensure!(
+            next.x.is_finite() && next.y.is_finite(),
+            "View is outside the coordinate range"
+        );
+        self.pan = next;
+        Ok(())
+    }
+    pub fn finish_geometry(&mut self, board: &mut Board, card: &Card) -> Result<()> {
+        if card.kind != Kind::Frame && !card.layout_header {
+            board.reparent(&card.id)?;
+        }
+        Ok(())
+    }
+    fn edit_gui(&mut self, board: &mut Board, edit: Edit<'_>) -> Result<()> {
+        edit.apply(self, board)?;
+        self.commands.push(edit.line());
+        Ok(())
     }
     pub fn fit(&mut self, board: &Board) {
         self.fit_cards(&board.cards());
@@ -99,16 +142,16 @@ impl Scene {
         if action.clicked {
             if let Some(from) = self.connecting.clone() {
                 if from != card.id && card.kind != Kind::Frame {
-                    self.selected = Some(board.connect(&from, &card.id)?);
-                    self.connecting = None;
-                    self.editing = None;
+                    self.edit_gui(board, Edit::Connect(&from, &card.id, ""))?;
                     return Ok(true);
                 }
             }
         }
         if action.select {
-            self.selected = Some(card.id.clone());
-            if self.editing.as_ref() != Some(&card.id) {
+            if self.connecting.is_none() {
+                self.select_gui(Some(card.id.clone()));
+            } else {
+                self.selected = Some(card.id.clone());
                 self.editing = None;
             }
         }
@@ -121,23 +164,26 @@ impl Scene {
             self.editing = None;
         }
         if action.delete {
-            board.delete(&card.id)?;
-            if self.selected.as_ref() == Some(&card.id) {
-                self.selected = None;
-                self.editing = None;
-            }
-            if self.connecting.as_ref() == Some(&card.id) {
-                self.connecting = None;
-            }
+            self.edit_gui(board, Edit::Delete(&card.id))?;
             return Ok(true);
         }
         if action.changed {
-            board.edit(card)?;
+            if action.text_changed {
+                self.edit_gui(board, Edit::Text(&card.id, &card.text))?;
+            } else {
+                board.edit(card)?;
+            }
             changed = true;
         }
-        if action.move_finished && card.kind != Kind::Frame && !card.layout_header {
-            board.reparent(&card.id)?;
-            changed = true;
+        if (action.move_finished || action.resize_finished) && !card.layout_header {
+            self.finish_geometry(board, card)?;
+            let edit = if action.resize_finished {
+                Edit::Resize(&card.id, card.width, card.height)
+            } else {
+                Edit::Move(&card.id, card.x, card.y)
+            };
+            self.commands.push(edit.line());
+            changed |= card.kind != Kind::Frame;
         }
         Ok(changed)
     }
@@ -149,7 +195,7 @@ impl Scene {
             ui.label(card.kind.name());
             if card.layout_header {
                 if ui.button("Select story map").clicked() {
-                    self.selected = card.parent.clone();
+                    self.select_gui(card.parent.clone());
                 }
                 return Ok(false);
             }
@@ -177,7 +223,7 @@ impl Scene {
                     }
                 });
                 if shape != card.shape {
-                    board.set_shape(&id, shape)?;
+                    self.edit_gui(board, Edit::Shape(&id, shape))?;
                     changed = true;
                 }
             }
@@ -203,10 +249,7 @@ impl Scene {
                 });
             });
             if resized {
-                board.edit(&card)?;
-                if card.kind != Kind::Frame {
-                    board.reparent(&id)?;
-                }
+                self.edit_gui(board, Edit::Resize(&id, card.width, card.height))?;
                 changed = true;
             }
             if let Some(parent) = &card.parent {
@@ -217,11 +260,11 @@ impl Scene {
             if let Some(axes) = board.story_axes(&id) {
                 ui.label("Story map");
                 if ui.button("+ Activity column").clicked() {
-                    board.add_axis(&id, true, "New activity")?;
+                    self.edit_gui(board, Edit::AxisAdd(&id, true, "New activity"))?;
                     changed = true;
                 }
                 if ui.button("+ Release lane").clicked() {
-                    board.add_axis(&id, false, "New release")?;
+                    self.edit_gui(board, Edit::AxisAdd(&id, false, "New release"))?;
                     changed = true;
                 }
                 let labels: std::collections::HashMap<_, _> =
@@ -232,7 +275,9 @@ impl Scene {
                             ui.label(labels.get(header).map(String::as_str).unwrap_or("Untitled"));
                             for (label, delta) in [("↑", -1), ("↓", 1)] {
                                 if ui.small_button(label).clicked()
-                                    && board.move_axis(&id, column, i, delta).is_ok()
+                                    && self
+                                        .edit_gui(board, Edit::AxisMove(&id, column, i, delta))
+                                        .is_ok()
                                 {
                                     changed = true;
                                 }
@@ -259,9 +304,7 @@ impl Scene {
                 )
                 .clicked()
                 {
-                    board.delete(&id)?;
-                    self.selected = None;
-                    self.cancel_edit();
+                    self.edit_gui(board, Edit::Delete(&id))?;
                     changed = true;
                 }
                 Ok(())
@@ -281,12 +324,11 @@ impl Scene {
                 )
                 .changed()
             {
-                board.label_connector(&id, &text)?;
+                self.edit_gui(board, Edit::Text(&id, &text))?;
                 changed = true;
             }
             if icon_button(ui, Icon::Trash, "Delete connector").clicked() {
-                board.delete(&id)?;
-                self.selected = None;
+                self.edit_gui(board, Edit::Delete(&id))?;
                 changed = true;
             }
             Ok(changed)
@@ -301,10 +343,9 @@ impl Scene {
         if std::mem::take(&mut self.fit_on_show) {
             self.fit(board);
         }
-        if let Some(pointer) = ui
-            .input(|input| input.pointer.hover_pos())
-            .filter(|p| ui.is_enabled() && rect.contains(*p))
-        {
+        if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()).filter(|p| {
+            ui.is_enabled() && rect.contains(*p) && ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
+        }) {
             let factor = ui.input(|input| {
                 let pinch = input.zoom_delta();
                 if pinch != 1. {
@@ -313,11 +354,24 @@ impl Scene {
                     (input.raw_scroll_delta.y * 0.003).exp()
                 }
             });
-            self.zoom_at(pointer - rect.min, factor);
+            let anchor = pointer - rect.min;
+            if self.zoom_at(anchor, factor)? {
+                self.commands.push(command::format(&[
+                    "view",
+                    "zoom",
+                    &factor.to_string(),
+                    &anchor.x.to_string(),
+                    &anchor.y.to_string(),
+                ]));
+            }
         }
         self.pointer = ui
             .input(|i| i.pointer.hover_pos())
-            .filter(|p| ui.is_enabled() && rect.contains(*p))
+            .filter(|p| {
+                ui.is_enabled()
+                    && rect.contains(*p)
+                    && ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
+            })
             .map(|p| {
                 let world = (p - rect.min - self.pan) / self.zoom;
                 [world.x, world.y]
@@ -330,25 +384,32 @@ impl Scene {
         if ui.is_enabled()
             && ui.input(|i| {
                 i.pointer.button_down(egui::PointerButton::Middle)
-                    && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))
+                    && i.pointer.interact_pos().is_some_and(|p| {
+                        rect.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
+                    })
             })
         {
-            self.pan += ui.input(|i| i.pointer.delta());
+            let delta = ui.input(|i| i.pointer.delta());
+            if delta != Vec2::ZERO {
+                self.pan_by(delta)?;
+                self.commands.push(command::format(&[
+                    "view",
+                    "pan",
+                    &delta.x.to_string(),
+                    &delta.y.to_string(),
+                ]));
+            }
         }
         let background_clicked = background.clicked();
-        if background_clicked {
-            self.selected = None;
-            self.editing = None;
-        }
+        let mut edge_hit = None;
         let mut changed = false;
         if ui.is_enabled()
             && self.editing.is_none()
             && !ui.ctx().wants_keyboard_input()
             && ui.input(|i| i.key_pressed(egui::Key::Delete))
         {
-            if let Some(id) = self.selected.take() {
-                board.delete(&id)?;
-                self.connecting = None;
+            if let Some(id) = self.selected.clone() {
+                self.edit_gui(board, Edit::Delete(&id))?;
                 changed = true;
             }
         }
@@ -428,7 +489,7 @@ impl Scene {
                         .char_limit(8000),
                 );
                 if field.changed() {
-                    board.label_connector(&edge.id, &label)?;
+                    self.edit_gui(board, Edit::Text(&edge.id, &label))?;
                     changed = true;
                 }
                 if field.lost_focus() {
@@ -453,23 +514,30 @@ impl Scene {
                         || segment_distance([p.x, p.y], [start.x, start.y], [end.x, end.y]) <= 7.
                 })
             {
-                if label_rect.contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or(Pos2::ZERO))
-                {
-                    self.editing = Some(edge.id.clone());
-                    ui.ctx().memory_mut(|m| m.request_focus(edit_id));
-                }
-                self.selected = Some(edge.id);
+                let edit = label_rect
+                    .contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or(Pos2::ZERO));
+                edge_hit = Some((edge.id, edit.then_some(edit_id)));
             }
+        }
+        if let Some((id, edit)) = edge_hit {
+            self.select_gui(Some(id.clone()));
+            if let Some(edit) = edit {
+                self.editing = Some(id);
+                ui.ctx().memory_mut(|m| m.request_focus(edit));
+            }
+        } else if background_clicked {
+            self.select_gui(None);
         }
         if let Some(from) = self
             .connecting
             .as_ref()
             .and_then(|id| lookup.get(id.as_str()))
         {
-            if let Some(pointer) = ui
-                .input(|i| i.pointer.hover_pos())
-                .filter(|p| ui.is_enabled() && rect.contains(*p))
-            {
+            if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()).filter(|p| {
+                ui.is_enabled()
+                    && rect.contains(*p)
+                    && ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
+            }) {
                 let start = self.screen(from.bounds().center(), rect.min);
                 draw_arrow(
                     ui.painter(),

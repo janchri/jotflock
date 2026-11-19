@@ -1,4 +1,5 @@
 mod card;
+mod command;
 mod desktop;
 mod document;
 mod geometry;
@@ -11,8 +12,11 @@ mod sharing;
 mod storage;
 mod story_map;
 mod templates;
+mod terminal;
 mod workspace;
 
+use anyhow::{ensure, Context, Result};
+use command::Edit;
 use document::Kind;
 use eframe::egui::{self, Color32};
 use interface::{
@@ -56,31 +60,45 @@ struct Canvas {
     copied_for: Option<String>,
     copied_at: Instant,
     preferences: std::path::PathBuf,
+    terminal: terminal::Terminal,
+    invitation: Option<String>,
+    copy_invitation: bool,
+    graphical: bool,
+    quit: bool,
 }
 impl Canvas {
-    fn new(cc: &eframe::CreationContext<'_>, instance: desktop::Instance) -> anyhow::Result<Self> {
-        let preferences = storage::root()?.join("editor-name.txt");
-        interface::theme(&cc.egui_ctx);
-        Ok(Self {
-            workspace: Workspace::load(storage::root()?)?,
-            scene: scene::Scene::default(),
-            status: "Saved locally".into(),
-            last_save: Instant::now(),
-            dialog: None,
-            previews: HashMap::new(),
-            template_previews: (0..templates::NAMES.len())
+    fn new(
+        root: std::path::PathBuf,
+        instance: desktop::Instance,
+        ctx: Option<&egui::Context>,
+        link: Option<String>,
+        live: bool,
+    ) -> Result<Self> {
+        let preferences = root.join("editor-name.txt");
+        let graphical = ctx.is_some();
+        let template_previews = if let Some(ctx) = ctx {
+            interface::theme(ctx);
+            (0..templates::NAMES.len())
                 .map(|index| {
                     let mut board = document::Board::new()?;
                     templates::insert(&mut board, index)?;
                     Ok(Preview::new(&board))
                 })
-                .collect::<anyhow::Result<_>>()?,
-            network: network::Network::start(storage::root()?),
+                .collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            workspace: Workspace::load(root.clone())?,
+            scene: scene::Scene::default(),
+            status: "Saved locally".into(),
+            last_save: Instant::now(),
+            dialog: None,
+            previews: HashMap::new(),
+            template_previews,
+            network: network::Network::start(live.then_some(root)),
             network_status: "Sharing is off".into(),
-            join_link: std::env::args()
-                .skip(1)
-                .find(|s| s.starts_with(sharing::PREFIX))
-                .unwrap_or_default(),
+            join_link: link.unwrap_or_default(),
             net_dirty: false,
             joining: false,
             last_publish: Instant::now(),
@@ -98,6 +116,11 @@ impl Canvas {
             copied_at: Instant::now(),
             preferences,
             retry_time: Instant::now(),
+            terminal: terminal::Terminal::default(),
+            invitation: None,
+            copy_invitation: false,
+            graphical,
+            quit: false,
         })
     }
     fn reset_view(&mut self) {
@@ -113,14 +136,26 @@ impl Canvas {
             }
         }
     }
+    fn flush(&mut self) -> Result<()> {
+        self.workspace.flush()?;
+        self.status = "Saved locally".into();
+        self.last_save = Instant::now();
+        Ok(())
+    }
     fn save(&mut self) {
-        match self.workspace.flush() {
-            Ok(()) => {
-                self.status = "Saved locally".into();
-                self.last_save = Instant::now();
-            }
-            Err(e) => self.status = format!("Save failed: {e:#}"),
+        if let Err(error) = self.flush() {
+            self.status = format!("Save failed: {error:#}");
         }
+    }
+    fn record_gui<T>(&mut self, line: String, result: Result<T>) {
+        match result {
+            Ok(_) => self.terminal.record(line),
+            Err(error) => self.status = format!("Error: {error:#}"),
+        }
+    }
+    fn run_gui(&mut self, args: &[&str]) {
+        let result = self.execute(&args.iter().map(|s| (*s).into()).collect::<Vec<_>>(), true);
+        self.record_gui(command::format(args), result);
     }
     fn result(&mut self, result: anyhow::Result<()>) {
         match result {
@@ -135,48 +170,119 @@ impl Canvas {
             Err(e) => self.status = format!("Error: {e:#}"),
         }
     }
-    fn lifecycle(&mut self, result: anyhow::Result<()>) {
-        match result {
-            Ok(()) => {
-                self.reset_view();
-                self.status = "Saved locally".into();
+    fn board_index(&self, id: &str) -> Option<usize> {
+        self.workspace
+            .entries
+            .iter()
+            .position(|e| e.board.id() == id)
+    }
+
+    fn create_board(&mut self, template: Option<usize>) -> Result<()> {
+        self.workspace.create_board(template)?;
+        self.reset_view();
+        self.home = false;
+        if template.is_some() {
+            self.fit_view()?;
+            self.scene.fit_on_show = self.graphical;
+        }
+        self.status = "Saved locally".into();
+        Ok(())
+    }
+
+    fn rename_board(&mut self, index: usize, title: &str) -> Result<()> {
+        if self.workspace.active == Some(index) {
+            self.workspace.entries[index].board.rename(title)?;
+            self.result(Ok(()));
+        } else {
+            self.workspace.rename(index, title)?;
+        }
+        Ok(())
+    }
+
+    fn close_board(&mut self, index: usize) -> Result<()> {
+        self.workspace.close(index)?;
+        self.reset_view();
+        self.home |= self.workspace.active.is_none();
+        self.status = "Saved locally".into();
+        Ok(())
+    }
+
+    fn delete_board(&mut self, index: usize) -> Result<std::path::PathBuf> {
+        let id = self.workspace.entries[index].board.id();
+        let path = self.workspace.delete(index)?;
+        self.previews.remove(&id);
+        self.reset_view();
+        self.home |= self.workspace.active.is_none();
+        self.status = format!("Board moved to {}", path.display());
+        Ok(path)
+    }
+
+    fn set_editor_name(&mut self, name: &str) -> Result<()> {
+        ensure!(
+            name.chars().count() <= 64,
+            "Editor name is limited to 64 characters"
+        );
+        storage::write_atomic(&self.preferences, name.as_bytes())?;
+        self.display_name = name.into();
+        Ok(())
+    }
+
+    fn go_home(&mut self) {
+        self.home = true;
+        self.scene.pointer = None;
+        self.scene.cancel_edit();
+    }
+
+    fn release_keyboard(ctx: &egui::Context) {
+        ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
             }
-            Err(e) => self.status = format!("Error: {e:#}"),
+        });
+    }
+
+    fn cancel_interaction(&mut self) {
+        self.scene.cancel_edit();
+        self.dialog = None;
+    }
+
+    fn fit_view(&mut self) -> Result<()> {
+        let board = self
+            .workspace
+            .board()
+            .ok_or_else(|| anyhow::anyhow!("No active board"))?;
+        self.scene.fit(board);
+        Ok(())
+    }
+
+    fn join_board(&mut self, link: &str) -> Result<()> {
+        ensure!(!self.joining, "A join is already in progress");
+        let ticket = sharing::Invitation::parse(link, sharing::now())?;
+        self.workspace.flush()?;
+        let local = self
+            .workspace
+            .entries
+            .iter_mut()
+            .find(|e| e.board.id() == ticket.body.board)
+            .map(|e| e.board.save());
+        self.network.join(ticket, local)?;
+        self.invitation = None;
+        self.copied_for = None;
+        self.copy_invitation = false;
+        self.joining = true;
+        self.network_error = None;
+        self.network_status = "Waiting for an online participant…".into();
+        Ok(())
+    }
+
+    fn join_gui(&mut self) {
+        let link = self.join_link.clone();
+        match self.join_board(&link) {
+            Ok(()) => self.terminal.record("share join <invitation>".into()),
+            Err(error) => self.network_status = format!("{error:#}"),
         }
     }
-    fn add(&mut self, kind: Kind, text: &str, x: f32, y: f32) {
-        if let Some(board) = self.workspace.board_mut() {
-            match board.add(kind, text, x, y) {
-                Ok(id) => {
-                    self.scene.selected = Some(id);
-                    self.scene.editing = None;
-                    self.result(Ok(()));
-                }
-                Err(error) => self.result(Err(error)),
-            }
-        }
-    }
-    fn join_board(&mut self) {
-        let result = (|| -> anyhow::Result<()> {
-            let ticket = sharing::Invitation::parse(&self.join_link, sharing::now())?;
-            self.workspace.flush()?;
-            let local = self
-                .workspace
-                .entries
-                .iter_mut()
-                .find(|e| e.board.id() == ticket.body.board)
-                .map(|e| e.board.save());
-            self.network.join(ticket, local)?;
-            self.joining = true;
-            self.network_error = None;
-            self.network_status = "Waiting for an online participant…".into();
-            Ok(())
-        })();
-        if let Err(e) = result {
-            self.network_status = e.to_string();
-        }
-    }
-    fn poll_network(&mut self, ctx: &egui::Context) {
+    fn poll_network(&mut self, ctx: Option<&egui::Context>) {
         while let Ok(event) = self.network.events.try_recv() {
             match event {
                 network::Event::Presence(epoch, peers) if epoch == self.network.epoch => {
@@ -202,6 +308,8 @@ impl Canvas {
                 network::Event::Fatal(text) => {
                     self.network_error = Some(text);
                     self.network.board = None;
+                    self.invitation = None;
+                    self.copy_invitation = false;
                     self.network.epoch += 1;
                     self.joining = false;
                 }
@@ -211,6 +319,8 @@ impl Canvas {
                     self.network_error = Some(text);
                     if terminal {
                         let _ = self.network.stop();
+                        self.invitation = None;
+                        self.copy_invitation = false;
                         self.network_status = "Sharing is off".into();
                         self.scene.remote.clear();
                         self.joining = false;
@@ -222,9 +332,16 @@ impl Canvas {
                     self.network_status = text
                 }
                 network::Event::Invitation(epoch, link) if epoch == self.network.epoch => {
-                    ctx.output_mut(|o| o.copied_text = link);
-                    self.copied_for = self.network.board.clone();
-                    self.copied_at = Instant::now();
+                    if let Some(ctx) = ctx.filter(|_| self.copy_invitation) {
+                        ctx.output_mut(|o| o.copied_text = link.clone());
+                        self.copied_for = self.network.board.clone();
+                        self.copied_at = Instant::now();
+                    }
+                    self.copy_invitation = false;
+                    self.invitation = Some(link);
+                    if self.network_status == "Preparing invitation…" {
+                        self.network_status = "Invitation ready".into();
+                    }
                 }
                 network::Event::Document(epoch, bytes) if epoch == self.network.epoch => {
                     let accepts = self.joining
@@ -238,7 +355,8 @@ impl Canvas {
                                     self.home = false;
                                     self.dialog = None;
                                     self.scene.reset();
-                                    self.scene.fit_on_show = true;
+                                    self.scene.fit(&self.workspace.entries[index].board);
+                                    self.scene.fit_on_show = self.graphical;
                                 }
                                 self.joining = false;
                                 self.receive_retry = false;
@@ -257,26 +375,23 @@ impl Canvas {
             }
         }
     }
-    fn template(&mut self, index: usize) {
-        if let Some(board) = self.workspace.board_mut() {
-            let previous: std::collections::HashSet<_> =
-                board.cards().into_iter().map(|c| c.id).collect();
-            let result = templates::insert(board, index);
-            match result {
-                Ok(id) => {
-                    self.scene.selected = Some(id);
-                    self.scene.editing = None;
-                    let added: Vec<_> = board
-                        .cards()
-                        .into_iter()
-                        .filter(|c| !previous.contains(&c.id))
-                        .collect();
-                    self.scene.fit_cards(&added);
-                    self.result(Ok(()));
-                }
-                Err(e) => self.result(Err(e)),
-            }
-        }
+    fn template(&mut self, index: usize) -> Result<String> {
+        let board = self
+            .workspace
+            .board_mut()
+            .ok_or_else(|| anyhow::anyhow!("No active board"))?;
+        let previous: std::collections::HashSet<_> =
+            board.cards().into_iter().map(|c| c.id).collect();
+        let id = templates::insert(board, index)?;
+        let added: Vec<_> = board
+            .cards()
+            .into_iter()
+            .filter(|c| !previous.contains(&c.id))
+            .collect();
+        self.scene.select(Some(id.clone()));
+        self.scene.fit_cards(&added);
+        self.result(Ok(()));
+        Ok(id)
     }
     fn wordmark(ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -304,30 +419,24 @@ impl Canvas {
                 ui.weak("Click to rename");
             });
         if response.changed() {
-            if self.workspace.active == Some(index) {
-                let result = self.workspace.entries[index].board.rename(&title);
-                self.result(result);
-            } else if let Err(error) = self.workspace.rename(index, &title) {
-                self.status = format!("Rename failed: {error}");
-            }
+            let result = self.rename_board(index, &title);
+            self.record_gui(command::format(&["board", "rename", &id, &title]), result);
         }
     }
 
-    fn open_board(&mut self, index: usize) {
-        if self.workspace.active == Some(index) {
-            self.home = false;
-        } else {
-            let result = self.workspace.open(index);
-            self.home = result.is_err();
-            self.lifecycle(result);
+    fn open_board(&mut self, index: usize) -> Result<()> {
+        if self.workspace.active != Some(index) {
+            self.workspace.open(index)?;
+            self.reset_view();
+            self.status = "Saved locally".into();
         }
+        self.home = false;
+        Ok(())
     }
 
     fn library_actions(&mut self, ui: &mut egui::Ui) {
         if primary(ui, "+  New board").clicked() {
-            let result = self.workspace.create();
-            self.home = result.is_err();
-            self.lifecycle(result);
+            self.run_gui(&["board", "new"]);
         }
         if ui.button("Join a board").clicked() {
             self.dialog = Some(Dialog::Join);
@@ -358,7 +467,7 @@ impl Canvas {
                     (Icon::Share, "Copy board invitation")
                 };
                 if icon_button(ui, icon, hint).clicked() {
-                    self.share(index);
+                    self.share_gui(index);
                 }
             });
         });
@@ -369,7 +478,7 @@ impl Canvas {
             );
         }
         if open {
-            self.open_board(index);
+            self.run_gui(&["board", "open", &id]);
         }
     }
 
@@ -433,10 +542,7 @@ impl Canvas {
         }
         heading(ui, "Start from a template", 17.);
         if let Some(index) = interface::template_choices(ui, &self.template_previews) {
-            let result = self.workspace.create_board(Some(index));
-            self.home = result.is_err();
-            self.lifecycle(result);
-            self.scene.fit_on_show = !self.home;
+            self.run_gui(&["board", "new", command::template_key(index)]);
         }
         if self.status != "Saved locally" {
             ui.label(&self.status);
@@ -461,7 +567,7 @@ impl Canvas {
             let enter = link.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_enabled_ui(!self.join_link.trim().is_empty() && !self.joining, |ui| {
                 if (primary(ui, "Join board").clicked() || enter) && ui.is_enabled() {
-                    self.join_board();
+                    self.join_gui();
                 }
             });
             if self.network_status != "Sharing is off" {
@@ -472,8 +578,11 @@ impl Canvas {
             }
             #[cfg(target_os = "linux")]
             if ui.link("Enable invitation links on this PC").clicked() {
-                self.network_status = match desktop::install() {
-                    Ok(()) => "Desktop invitation links enabled".into(),
+                self.network_status = match command::desktop_install() {
+                    Ok(()) => {
+                        self.terminal.record("share install".into());
+                        "Desktop invitation links enabled".into()
+                    }
                     Err(error) => format!("Desktop integration failed: {error}"),
                 };
             }
@@ -489,32 +598,50 @@ impl Canvas {
             choice = interface::template_choices(ui, &self.template_previews);
         });
         if let Some(index) = choice {
-            self.template(index);
+            self.run_gui(&["template", "insert", command::template_key(index)]);
         }
         if closed || choice.is_some() {
             self.dialog = None;
         }
     }
-    fn share(&mut self, index: usize) {
+    fn share(&mut self, index: usize, copy: bool) -> Result<()> {
         let id = self.workspace.entries[index].board.id();
+        if self.workspace.active != Some(index) {
+            self.workspace.open(index)?;
+            self.reset_view();
+        }
+        self.network
+            .share(id, self.workspace.entries[index].board.save())?;
         self.copied_for = None;
-        let result = (|| -> anyhow::Result<()> {
-            if self.workspace.active != Some(index) {
-                self.workspace.open(index)?;
-                self.reset_view();
-            }
-            self.network
-                .share(id.clone(), self.workspace.entries[index].board.save())?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.joining = false;
-                self.network_error = None;
-                self.network_status = "Preparing invitation…".into();
-            }
+        self.invitation = None;
+        self.copy_invitation = copy;
+        self.joining = false;
+        self.network_error = None;
+        self.network_status = "Preparing invitation…".into();
+        Ok(())
+    }
+
+    fn share_gui(&mut self, index: usize) {
+        let id = self.workspace.entries[index].board.id();
+        match self.share(index, true) {
+            Ok(()) => self
+                .terminal
+                .record(command::format(&["share", "invite", &id])),
             Err(error) => self.network_error = Some(error.to_string()),
         }
+    }
+
+    fn stop_sharing(&mut self) -> Result<()> {
+        if self.network.board.is_some() {
+            self.network.stop()?;
+        }
+        self.joining = false;
+        self.copied_for = None;
+        self.invitation = None;
+        self.copy_invitation = false;
+        self.network_status = "Sharing is off".into();
+        self.scene.remote.clear();
+        Ok(())
     }
 
     fn board_settings(&mut self, ctx: &egui::Context, id: String) {
@@ -532,34 +659,27 @@ impl Canvas {
             ui.label("Board name");
             self.title(ui, index, ui.available_width(), true);
             ui.label("Your editor name");
+            let mut name = self.display_name.clone();
             if ui
                 .add(
-                    egui::TextEdit::singleline(&mut self.display_name)
+                    egui::TextEdit::singleline(&mut name)
                         .desired_width(f32::INFINITY)
                         .char_limit(64),
                 )
                 .changed()
             {
-                if let Err(error) =
-                    storage::write_atomic(&self.preferences, self.display_name.as_bytes())
-                {
-                    self.status = format!("Could not save editor name: {error}");
-                }
+                self.run_gui(&["editor", "name", &name]);
             }
             ui.add_space(8.);
             ui.separator();
             heading(ui, "Share this board", 18.);
             ui.horizontal_wrapped(|ui| {
                 if primary(ui, "Copy invitation").clicked() {
-                    self.share(index);
+                    self.share_gui(index);
                 }
                 if self.network.board.as_ref() == Some(&id) && ui.button("Stop sharing").clicked() {
-                    match self.network.stop() {
-                        Ok(()) => {
-                            self.joining = false;
-                            self.copied_for = None;
-                            self.network_status = "Sharing is off".into();
-                        }
+                    match self.stop_sharing() {
+                        Ok(()) => self.terminal.record("share stop".into()),
                         Err(error) => self.network_error = Some(error.to_string()),
                     }
                 }
@@ -577,9 +697,9 @@ impl Canvas {
             ui.separator();
             ui.horizontal(|ui| {
                 if self.workspace.entries[index].open && ui.button("Close board").clicked() {
-                    let result = self.workspace.close(index);
+                    let result = self.close_board(index);
                     close_settings = result.is_ok();
-                    self.lifecycle(result);
+                    self.record_gui(command::format(&["board", "close", &id]), result);
                 }
                 if ui.button("Delete board…").clicked() {
                     self.dialog = Some(Dialog::Delete(id.clone()));
@@ -621,25 +741,45 @@ impl Canvas {
             self.dialog = None;
         }
         if delete {
-            match self.workspace.delete(index) {
-                Ok(path) => {
-                    self.previews.remove(&id);
-                    self.reset_view();
-                    self.status = format!("Board moved to {}", path.display());
-                }
-                Err(e) => self.status = format!("Delete failed: {e:#}"),
-            }
+            let result = self.delete_board(index);
+            self.record_gui(command::format(&["board", "delete", &id]), result);
             self.dialog = None;
         }
     }
 }
-impl eframe::App for Canvas {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+impl Canvas {
+    fn command_reply(&mut self, args: &[String], persistent: bool) -> desktop::Reply {
+        let result = self.execute(args, persistent).and_then(|value| {
+            if self.workspace.dirty && !command::is_query(args) {
+                self.flush()
+                    .context("Command applied in memory but local save failed")?;
+            }
+            self.update_share();
+            Ok(value)
+        });
+        result.into()
+    }
+
+    fn poll(&mut self, ctx: Option<&egui::Context>) {
         while let Ok(link) = self.instance.links.try_recv() {
             self.join_link = link;
             self.start_link = true;
         }
         self.poll_network(ctx);
+        for _ in 0..8 {
+            if self.quit {
+                break;
+            }
+            let Ok(request) = self.instance.commands.try_recv() else {
+                break;
+            };
+            let reply = self.command_reply(&request.args, true);
+            if reply.ok() && !command::is_query(&request.args) {
+                let args: Vec<_> = request.args.iter().map(String::as_str).collect();
+                self.terminal.record(command::format(&args));
+            }
+            request.respond(&reply);
+        }
         if self.copied_at.elapsed() > Duration::from_secs(4) {
             self.copied_for = None;
         }
@@ -649,18 +789,81 @@ impl eframe::App for Canvas {
         if self.start_link {
             self.start_link = false;
             if !self.join_link.is_empty() {
-                self.dialog = Some(Dialog::Join);
-                self.join_board();
+                if self.graphical {
+                    self.dialog = Some(Dialog::Join);
+                }
+                self.join_gui();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.scene.cancel_edit();
-            self.dialog = None;
-            ctx.memory_mut(|m| {
-                if let Some(id) = m.focused() {
-                    m.surrender_focus(id);
+    }
+
+    fn update_share(&mut self) {
+        if self.network.board.is_some()
+            && !self.joining
+            && self.workspace.board().map(document::Board::id) != self.network.board
+            && self.stop_sharing().is_ok()
+        {
+            self.network_status = "Sharing stopped because the board was closed or changed".into();
+        }
+    }
+
+    fn tick(&mut self) {
+        self.update_share();
+        if self.net_dirty
+            && self.network.board.is_some()
+            && !self.joining
+            && self.last_publish.elapsed() > Duration::from_millis(200)
+        {
+            if let Some(board) = self.workspace.board_mut() {
+                match self.network.publish(board.save()) {
+                    Ok(()) => {
+                        self.net_dirty = false;
+                        self.network_error = None;
+                        self.last_publish = Instant::now();
+                    }
+                    Err(e) => self.network_status = e.to_string(),
                 }
-            });
+            }
+        }
+        if self.receive_retry
+            && self.network.board.is_some()
+            && self.retry_time.elapsed() > Duration::from_secs(2)
+        {
+            let _ = self.network.refresh();
+            self.retry_time = Instant::now();
+        }
+        self.network.presence(network::Presence {
+            name: self.display_name.clone(),
+            cursor: self
+                .scene
+                .pointer
+                .filter(|p| p.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.)),
+            selected: self.scene.selected.clone(),
+        });
+        if self.workspace.dirty && self.last_save.elapsed() >= Duration::from_millis(500) {
+            self.save();
+        }
+    }
+}
+impl eframe::App for Canvas {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let had_dialog = self.dialog.is_some();
+        self.poll(Some(ctx));
+        if had_dialog && self.dialog.is_none() {
+            Self::release_keyboard(ctx);
+        }
+        if self.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.dialog.is_some()
+                || self.scene.editing.is_some()
+                || self.scene.connecting.is_some()
+            {
+                self.run_gui(&["view", "cancel"]);
+            }
+            Self::release_keyboard(ctx);
         }
         if self.workspace.board().is_none() {
             self.home = true;
@@ -681,8 +884,7 @@ impl eframe::App for Canvas {
                         Self::wordmark(ui);
                     } else {
                         if icon_button(ui, Icon::Home, "Return to Home").clicked() {
-                            self.home = true;
-                            self.scene.cancel_edit();
+                            self.run_gui(&["view", "home"]);
                         }
                         ui.separator();
                         if let Some(index) = self.workspace.active {
@@ -717,6 +919,7 @@ impl eframe::App for Canvas {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             self.home(ui);
+                            ui.add_space(44.);
                         });
                 });
         } else {
@@ -746,16 +949,14 @@ impl eframe::App for Canvas {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if icon_button(ui, Icon::Fit, "Fit board to window").clicked() {
-                                if let Some(board) = self.workspace.board() {
-                                    self.scene.fit(board);
-                                }
+                                self.run_gui(&["view", "fit"]);
                             }
                             if icon_button(ui, Icon::Plus, "Zoom in").clicked() {
-                                self.scene.zoom_center(1.2);
+                                self.run_gui(&["view", "zoom", "1.2"]);
                             }
                             ui.label(format!("{:.0}%", self.scene.zoom * 100.));
                             if icon_button(ui, Icon::Minus, "Zoom out").clicked() {
-                                self.scene.zoom_center(1. / 1.2);
+                                self.run_gui(&["view", "zoom", &(1_f32 / 1.2).to_string()]);
                             }
                         });
                     });
@@ -777,12 +978,12 @@ impl eframe::App for Canvas {
                             (Kind::Frame, Icon::Frame, "Untitled frame"),
                         ] {
                             if icon_button(ui, icon, &format!("Add {}", kind.name())).clicked() {
-                                self.add(
-                                    kind,
-                                    initial,
-                                    (60. - self.scene.pan.x) / self.scene.zoom,
-                                    (60. - self.scene.pan.y) / self.scene.zoom,
-                                );
+                                let x = (60. - self.scene.pan.x) / self.scene.zoom;
+                                let y = (60. - self.scene.pan.y) / self.scene.zoom;
+                                let edit = Edit::Add(kind, x, y, initial);
+                                let line = edit.line();
+                                let result = self.edit_command(edit);
+                                self.record_gui(line, result);
                             }
                         }
                         ui.separator();
@@ -833,47 +1034,22 @@ impl eframe::App for Canvas {
             }
             None => {}
         }
-        if self.network.board.is_some()
-            && !self.joining
-            && self.workspace.board().map(document::Board::id) != self.network.board
-            && self.network.stop().is_ok()
-        {
-            self.network_status = "Sharing stopped because the board was closed or changed".into();
+        for line in std::mem::take(&mut self.scene.commands) {
+            self.terminal.record(line);
         }
-        if self.net_dirty
-            && self.network.board.is_some()
-            && !self.joining
-            && self.last_publish.elapsed() > Duration::from_millis(200)
-        {
-            if let Some(board) = self.workspace.board_mut() {
-                match self.network.publish(board.save()) {
-                    Ok(()) => {
-                        self.net_dirty = false;
-                        self.network_error = None;
-                        self.last_publish = Instant::now();
-                    }
-                    Err(e) => self.network_status = e.to_string(),
-                }
-            }
+        if let Some(line) = self.terminal.show(ctx, self.home, self.dialog.is_none()) {
+            let parsed = command::parse(&line);
+            let display = parsed.as_ref().map_or_else(
+                |_| line.clone(),
+                |args| command::format(&args.iter().map(String::as_str).collect::<Vec<_>>()),
+            );
+            let reply = match parsed {
+                Ok(args) => self.command_reply(&args, true),
+                Err(error) => desktop::Reply::from(Err(error)),
+            };
+            self.terminal.reply(display, &reply);
         }
-        if self.receive_retry
-            && self.network.board.is_some()
-            && self.retry_time.elapsed() > Duration::from_secs(2)
-        {
-            let _ = self.network.refresh();
-            self.retry_time = Instant::now();
-        }
-        self.network.presence(network::Presence {
-            name: self.display_name.clone(),
-            cursor: self
-                .scene
-                .pointer
-                .filter(|p| p.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.)),
-            selected: self.scene.selected.clone(),
-        });
-        if self.workspace.dirty && self.last_save.elapsed() >= Duration::from_millis(500) {
-            self.save();
-        }
+        self.tick();
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
@@ -881,22 +1057,47 @@ impl eframe::App for Canvas {
     }
 }
 fn main() -> eframe::Result<()> {
-    let setup = (|| -> anyhow::Result<Option<desktop::Instance>> {
-        if std::env::args().any(|s| s == "--install-desktop") {
-            desktop::install()?;
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("cli") => {
+            let reply = cli(&args[1..]).unwrap_or_else(|error| Err(error).into());
+            println!(
+                "{}",
+                serde_json::to_string(&reply).expect("Command replies are serializable")
+            );
+            if !reply.ok() {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("--headless") => {
+            if let Err(error) = headless(&args[1..]) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            println!("jotflock [INVITATION]     Open the desktop application\njotflock --headless       Run without a window\njotflock cli help         List commands\njotflock --install-desktop");
+            return Ok(());
+        }
+        _ => {}
+    }
+    let setup = (|| -> Result<_> {
+        if args.iter().any(|s| s == "--install-desktop") {
+            command::desktop_install()?;
             return Ok(None);
         }
-        let link = std::env::args()
-            .skip(1)
-            .find(|s| s.starts_with(sharing::PREFIX));
-        desktop::instance(&storage::root()?, link.as_deref())
+        let link = args.into_iter().find(|s| s.starts_with(sharing::PREFIX));
+        let root = storage::root()?;
+        Ok(desktop::instance(&root, link.as_deref())?.map(|instance| (root, instance, link)))
     })();
-    let instance = match setup {
-        Ok(Some(instance)) => instance,
+    let (root, instance, link) = match setup {
+        Ok(Some(setup)) => setup,
         Ok(None) => return Ok(()),
         Err(error) => {
             eprintln!("{error:#}");
-            return Ok(());
+            std::process::exit(1);
         }
     };
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/jotflock.png"))
@@ -911,6 +1112,51 @@ fn main() -> eframe::Result<()> {
                 .with_min_inner_size([370., 280.]),
             ..Default::default()
         },
-        Box::new(move |cc| Ok(Box::new(Canvas::new(cc, instance)?))),
+        Box::new(move |cc| {
+            Ok(Box::new(Canvas::new(
+                root,
+                instance,
+                Some(&cc.egui_ctx),
+                link,
+                true,
+            )?))
+        }),
     )
+}
+
+fn cli(args: &[String]) -> Result<desktop::Reply> {
+    if args.is_empty() || (args.len() == 1 && (args[0] == "help" || args[0] == "--help")) {
+        return Ok(Ok(serde_json::json!(command::USAGE)).into());
+    }
+    let root = storage::root()?;
+    match desktop::instance(&root, None)? {
+        Some(instance) => {
+            let mut app = Canvas::new(root, instance, None, None, false)?;
+            Ok(app.command_reply(args, false))
+        }
+        None => desktop::send(&root, args),
+    }
+}
+
+fn headless(args: &[String]) -> Result<()> {
+    ensure!(cfg!(unix), "Persistent headless mode requires Unix sockets");
+    ensure!(
+        args.len() <= 1
+            && args
+                .first()
+                .is_none_or(|link| link.starts_with(sharing::PREFIX)),
+        "Usage: jotflock --headless [INVITATION]"
+    );
+    let root = storage::root()?;
+    let instance = desktop::instance(&root, None)?
+        .ok_or_else(|| anyhow::anyhow!("Jotflock is already running for this data directory"))?;
+    let mut app = Canvas::new(root, instance, None, args.first().cloned(), true)?;
+    while !app.quit {
+        app.poll(None);
+        app.tick();
+        if !app.quit {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(())
 }
