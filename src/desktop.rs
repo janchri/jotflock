@@ -109,7 +109,11 @@ pub fn instance(root: &Path, link: Option<&str>) -> Result<Option<Instance>> {
         .create(true)
         .truncate(false)
         .open(root.join("app.lock"))?;
-    if lock.try_lock().is_err() {
+    if let Err(error) = lock.try_lock() {
+        match error {
+            fs::TryLockError::WouldBlock => {}
+            fs::TryLockError::Error(error) => return Err(error).context("Locking app profile"),
+        }
         #[cfg(unix)]
         if let Some(link) = link {
             let mut stream = UnixStream::connect(root.join("app.sock"))

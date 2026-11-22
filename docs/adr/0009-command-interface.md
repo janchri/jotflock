@@ -1,35 +1,39 @@
-# ADR 0009 — Application commands and headless mode
+# ADR 0009 — Commands and headless mode
 
-The desktop command bar and shell CLI use the same command dispatcher. Desktop
-controls use the same application and document operations. A drag updates the
-document while the pointer moves and records an absolute move or resize command
-when released. Scrolling and pinching use the canvas zoom operation with a local
-anchor. The GUI keeps a bounded in-memory transcript with the latest commands.
+Status: Implemented. Running-instance commands and persistent headless mode require Unix.
 
-A profile has one owner at a time. A desktop or headless owner accepts argument
-arrays on the existing private Unix socket and serializes them with the other
-application events. Command clients use that owner's live document, selection,
-viewport and sharing session. The socket still accepts forwarded desktop
-invitation links. If no owner is running, a CLI process takes the profile lock,
-executes one local command, and saves its edits before exiting. This mode skips
-network startup. A headless owner runs the same workspace, autosave and network
-loop as the desktop without creating a window or rendering previews.
+## Decision
 
-Local clients can also send a UTF-8 JSON array of argument strings directly
-to `app.sock` and close their write half to mark the end of the request. Each
-connection carries one command and one response. The executable handles profile
-locking and the offline fallback for shell clients.
+Use the same command dispatcher for the desktop command bar and shell CLI.
+For example, `jotflock cli board list` reads the running profile's boards, or
+opens the profile for one local command when it has no owner.
 
-Commands identify boards, cards, connectors and story map frames by their
-existing IDs. Output has a JSON success or failure envelope. Board and network
-schemas are unchanged. Store and network limits still apply. Document writes
-from the CLI are saved locally before success, and synchronization runs in
-the background. Read commands can observe unsaved changes from the GUI because
-they read the running workspace. If an edit applies in memory but saving fails,
-the error says so and autosave can retry the local save.
+The command bar uses Ctrl+K. Dragging edits continuously and records the final
+absolute move or resize when released. The recent command history stays in memory.
 
-The command set covers board management, canvas edits, templates, story map
-axes, view and selection changes, editor settings and sharing. OS clipboard and
-widget focus stay in the desktop. Headless sharing, view state and command
-history last for the lifetime of the process. Command history is a recent
-activity log. Commands that create objects allocate new IDs when run again.
+## Ownership and persistence
+
+An exclusive profile lock prevents concurrent owners. On Unix, clients send JSON
+argument arrays through the private `app.sock` and receive a JSON success/error
+envelope. Invitation links use the same socket. Commands run against the owner's
+document, selection, viewport and sharing session.
+
+Without an owner, a CLI process locks the profile, runs one local command, saves
+changes and exits. Persistent sharing requires a desktop or headless owner.
+`jotflock --headless` runs the workspace, autosave and network loop without a window.
+
+## Limits
+
+Windows supports the desktop command bar and local CLI calls when the profile is
+free. Forwarding commands to a running Windows instance and persistent headless
+mode are unavailable. Linux desktop link registration is explicit.
+The release executable uses the Windows GUI subsystem; CLI invocations attach to
+their parent console for output.
+
+CLI edits save before reporting success. A save failure can leave edits in memory
+for autosave to retry. View state and history last for the owner's process.
+Replaying a creation command allocates new IDs. Clipboard and widget focus belong
+to the desktop.
+
+Code — [command.rs](../../src/command.rs), [desktop.rs](../../src/desktop.rs),
+[terminal.rs](../../src/terminal.rs).

@@ -1,32 +1,34 @@
-# ADR 0001: Native local-first desktop foundation
+# ADR 0001 — Native desktop and local storage
 
-Status: Accepted and implemented; networking added by ADR 0006.
-
-## Context
-
-The repository includes a website clone and an older Rust prototype with
-unauthenticated LAN multicast. Jotflock needs a native desktop foundation with
-local ownership of board data and an eventual encrypted peer-to-peer transport.
+Status: Implemented.
 
 ## Decision
 
-Use Rust with eframe/egui for the desktop UI and Automerge for board state and
-collaborative text. Keep document editing independent of GUI rendering and disk
-storage. Use stable IDs and deletion tombstones rather than replacing whole board
-snapshots. The existing UDP transport is not carried into this application.
+Use Rust and eframe/egui for the desktop app, Automerge for collaborative board
+state, and iroh for live sharing. Keep document operations independent of rendering.
+The build workflow packages a Linux AppImage and a portable Windows executable.
 
-For the initial implementation, store full Automerge files using temporary-file
-replacement, filesystem sync and previous-version backups. Persist open/closed
-board state separately. Closing must save successfully before releasing a board;
-board deletion moves the file to local trash. Ship Linux development builds as
-AppImages, retaining the beige, violet and blue visual design.
+For example, closing a board saves it and keeps it in the library. Deleting it
+saves its latest content, then moves the board file into local `trash/`.
 
-## Consequences
+## Storage
 
-Document merge and synchronization can be tested without a GUI or network. Files
-remain portable at the document level, but they are not yet a user-facing archive
-format. Saving/materialization currently run synchronously and full history grows
-with edits. SQLite, background work and history compaction need later decisions.
-Invitations, iroh transport, relay fallback and authenticated membership were added
-in ADR 0006, with their verification boundary recorded there. The prototype's JSON file
-is preserved but not imported automatically.
+- Each board is a full `<id>.automerge` file in the platform app data directory.
+  `JOTFLOCK_DATA_DIR` overrides that directory.
+- Saves validate the board and copy the previous file to `.bak`. A shared writer
+  uses a unique temporary file, syncs it and atomically replaces the destination.
+  Unix files use mode 0600 and the writer also syncs the directory.
+- `session.json` stores open board IDs and the active board. Editor preferences
+  and network authorization are separate files.
+- Invalid files and board IDs that disagree with their filenames report an error.
+  Legacy prototype JSON import is pending.
+
+## Limits
+
+Saving and materializing boards run synchronously. Full CRDT history grows with
+edits. Background storage, compaction and a portable archive format are pending.
+Board, session and trash updates span separate filesystem operations. A failure
+after a rename can leave an uncertain result on disk.
+
+Code — [storage.rs](../../src/storage.rs), [workspace.rs](../../src/workspace.rs),
+[build workflow](../../.github/workflows/build.yml).

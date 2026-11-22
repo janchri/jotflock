@@ -316,14 +316,35 @@ impl Canvas {
         let args = args.as_slice();
         match args {
             [] | ["help"] | ["--help"] => Ok(json!(USAGE)),
-            ["history"] => Ok(json!(self.terminal.history().collect::<Vec<_>>())) ,
-            ["board", "list"] => Ok(json!(self.workspace.entries.iter().enumerate().map(|(index, e)| {
-                json!({"id": e.board.id(), "title": e.board.title(), "open": e.open, "active": self.workspace.active == Some(index)})
-            }).collect::<Vec<_>>())),
+            ["history"] => Ok(json!(self.terminal.history().collect::<Vec<_>>())),
+            ["board", "list"] => {
+                let boards: Vec<_> = self
+                    .workspace
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        json!({
+                            "id": entry.board.id(),
+                            "title": entry.board.title(),
+                            "open": entry.open,
+                            "active": self.workspace.active == Some(index),
+                        })
+                    })
+                    .collect();
+                Ok(json!(boards))
+            }
             ["board", "show", rest @ ..] if rest.len() <= 1 => {
                 let index = self.target_index(rest)?;
-                let e = &self.workspace.entries[index];
-                Ok(json!({"id": e.board.id(), "title": e.board.title(), "open": e.open, "active": self.workspace.active == Some(index), "cards": e.board.cards(), "connectors": e.board.connectors()}))
+                let entry = &self.workspace.entries[index];
+                Ok(json!({
+                    "id": entry.board.id(),
+                    "title": entry.board.title(),
+                    "open": entry.open,
+                    "active": self.workspace.active == Some(index),
+                    "cards": entry.board.cards(),
+                    "connectors": entry.board.connectors(),
+                }))
             }
             ["board", "new", rest @ ..] if rest.len() <= 1 => {
                 let index = rest.first().map(|s| template(s)).transpose()?;
@@ -364,26 +385,52 @@ impl Canvas {
                 Ok(json!({"selected": id}))
             }
             ["object", "add", kind, x, y, label] => {
-                let kind = Kind::ALL.into_iter().find(|candidate| candidate.key() == *kind).context("Unknown object kind")?;
+                let kind = Kind::ALL
+                    .into_iter()
+                    .find(|candidate| candidate.key() == *kind)
+                    .context("Unknown object kind")?;
                 self.edit_command(Edit::Add(kind, number(x)?, number(y)?, label))
             }
-            ["object", "move", id, x, y] => self.edit_command(Edit::Move(id, number(x)?, number(y)?)),
-            ["object", "resize", id, w, h] => self.edit_command(Edit::Resize(id, number(w)?, number(h)?)),
+            ["object", "move", id, x, y] => {
+                self.edit_command(Edit::Move(id, number(x)?, number(y)?))
+            }
+            ["object", "resize", id, w, h] => {
+                self.edit_command(Edit::Resize(id, number(w)?, number(h)?))
+            }
             ["object", "text", id, label] => self.edit_command(Edit::Text(id, label)),
             ["object", "shape", id, name] => {
-                let shape = Shape::ALL.into_iter().find(|s| s.name().eq_ignore_ascii_case(name)).context("Unknown shape")?;
+                let shape = Shape::ALL
+                    .into_iter()
+                    .find(|shape| shape.name().eq_ignore_ascii_case(name))
+                    .context("Unknown shape")?;
                 self.edit_command(Edit::Shape(id, shape))
             }
             ["object", "delete", id] => self.edit_command(Edit::Delete(id)),
-            ["connector", "add", from, to, rest @ ..] if rest.len() <= 1 => {
-                self.edit_command(Edit::Connect(from, to, rest.first().copied().unwrap_or_default()))
+            ["connector", "add", from, to, rest @ ..] if rest.len() <= 1 => self.edit_command(
+                Edit::Connect(from, to, rest.first().copied().unwrap_or_default()),
+            ),
+            ["template", "list"] => {
+                let templates: Vec<_> = TEMPLATES
+                    .iter()
+                    .zip(templates::NAMES)
+                    .map(|(id, title)| json!({"id": id, "title": title}))
+                    .collect();
+                Ok(json!(templates))
             }
-            ["template", "list"] => Ok(json!(TEMPLATES.iter().zip(templates::NAMES).map(|(id, title)| json!({"id": id, "title": title})).collect::<Vec<_>>())),
             ["template", "insert", name] => Ok(json!({"id": self.template(template(name)?)?})),
-            ["story", "axes", frame] => Ok(json!(self.current_board()?.story_axes(frame).context("Not a story map")?)),
-            ["story", "add", frame, kind, title] => self.edit_command(Edit::AxisAdd(frame, axis(kind)?, title)),
+            ["story", "axes", frame] => {
+                let axes = self
+                    .current_board()?
+                    .story_axes(frame)
+                    .context("Not a story map")?;
+                Ok(json!(axes))
+            }
+            ["story", "add", frame, kind, title] => {
+                self.edit_command(Edit::AxisAdd(frame, axis(kind)?, title))
+            }
             ["story", "move", frame, kind, index, delta] => {
-                self.edit_command(Edit::AxisMove(frame, axis(kind)?, index.parse().context("Expected a zero-based axis index")?, direction(delta)?))
+                let index = index.parse().context("Expected a zero-based axis index")?;
+                self.edit_command(Edit::AxisMove(frame, axis(kind)?, index, direction(delta)?))
             }
             ["view", "status"] => Ok(self.view_status()),
             ["view", "home"] => {
@@ -428,12 +475,18 @@ impl Canvas {
                 "peers": self.scene.remote.iter().map(|p| json!({"name": p.name, "cursor": p.cursor, "selected": p.selected})).collect::<Vec<_>>()
             })),
             ["share", "invite", rest @ ..] if rest.len() <= 1 => {
-                ensure!(persistent, "Start Jotflock or jotflock --headless to keep a live session");
+                ensure!(
+                    persistent,
+                    "Start Jotflock or jotflock --headless to keep a live session"
+                );
                 self.share(self.target_index(rest)?, false)?;
                 Ok(json!({"pending": true}))
             }
             ["share", "join", link] => {
-                ensure!(persistent, "Start Jotflock or jotflock --headless to keep a live session");
+                ensure!(
+                    persistent,
+                    "Start Jotflock or jotflock --headless to keep a live session"
+                );
                 self.join_board(link)?;
                 Ok(json!({"pending": true}))
             }

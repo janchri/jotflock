@@ -118,12 +118,21 @@ impl Board {
                 && Uuid::parse_str(&self.id()).is_ok(),
             "Unsupported or invalid board"
         );
-        for card in self.cards() {
-            Self::validate_geometry(&card)?;
+        let mut cards = self.raw_cards();
+        for card in &cards {
+            Self::validate_geometry(card)?;
             let (_, obj) = self
                 .doc
                 .get(ROOT, &card.id)?
                 .ok_or_else(|| anyhow!("Missing object"))?;
+            for key in ["x", "y", "width", "height"] {
+                if let Some((value, _)) = self.doc.get(&obj, key)? {
+                    ensure!(
+                        value.as_f64().is_some_and(|n| (n as f32).is_finite()),
+                        "Invalid object geometry field {key}"
+                    );
+                }
+            }
             let (value, _) = self
                 .doc
                 .get(obj, "text")?
@@ -132,6 +141,10 @@ impl Board {
                 matches!(value, automerge::Value::Object(ObjType::Text)),
                 "Invalid object text"
             );
+        }
+        self.project_cards(&mut cards);
+        for card in &cards {
+            Self::validate_geometry(card)?;
         }
         Ok(())
     }
@@ -172,9 +185,8 @@ impl Board {
     pub fn save(&mut self) -> Vec<u8> {
         self.doc.save()
     }
-    pub fn cards(&self) -> Vec<Card> {
-        let mut cards: Vec<Card> = self
-            .doc
+    fn raw_cards(&self) -> Vec<Card> {
+        self.doc
             .keys(ROOT)
             .filter(|key| key.starts_with("card:"))
             .filter_map(|key| {
@@ -230,21 +242,27 @@ impl Board {
                     },
                 })
             })
-            .collect();
+            .collect()
+    }
+    pub fn cards(&self) -> Vec<Card> {
+        let mut cards = self.raw_cards();
+        self.project_cards(&mut cards);
+        cards
+    }
+    fn project_cards(&self, cards: &mut [Card]) {
         let frames: std::collections::HashSet<_> = cards
             .iter()
             .filter(|c| c.kind == Kind::Frame)
             .map(|c| c.id.clone())
             .collect();
-        for card in &mut cards {
+        for card in cards.iter_mut() {
             if card.kind == Kind::Frame
                 || card.parent.as_ref().is_some_and(|id| !frames.contains(id))
             {
                 card.parent = None;
             }
         }
-        crate::story_map::project(&self.doc, &mut cards);
-        cards
+        crate::story_map::project(&self.doc, cards);
     }
     pub fn add(&mut self, kind: Kind, text: &str, x: f32, y: f32) -> Result<String> {
         ensure!(

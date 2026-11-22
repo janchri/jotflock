@@ -6,7 +6,7 @@ linuxdeploy_bin="${LINUXDEPLOY:-linuxdeploy}"
 command -v "$linuxdeploy_bin" >/dev/null || { echo 'linuxdeploy with its AppImage output plugin is required' >&2; exit 1; }
 arch=$(uname -m)
 case "$arch" in x86_64|aarch64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1;; esac
-cargo build --release -p jotflock
+cargo build --release --locked -p jotflock
 bundle="$PWD/target/jotflock.AppDir"
 mkdir -p "$bundle/usr/bin"
 cp target/release/jotflock "$bundle/usr/bin/"

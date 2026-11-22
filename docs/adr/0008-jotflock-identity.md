@@ -1,12 +1,30 @@
-# ADR 0008 — Jotflock project identity
+# ADR 0008 — Jotflock identity
 
-Jotflock uses a bold violet **jot** and regular flock wordmark. The executable,
-desktop launcher, AppImage, configuration variables and invitation scheme use
-the Jotflock name.
+Status: Implemented.
 
-The invitation signature domains and transport identifier use the new name.
-Owners issue fresh invitations using their existing device keys. New grants are
-saved under `network/access/`. Previous records retain the local board's
-authority binding so a returning editor can rejoin the same board with a new
-grant. Previous invitation links and grants cannot be used for admission.
-The board document format and device key file retain their existing formats.
+## Decision
+
+Use two marks.
+
+- **Full wordmark** — bold violet **jot**, regular dark flock, then three dots
+  matching flock's color. Used in desktop Home and the website header and footer.
+- **Compact mark** — a violet lowercase **j** with three blue flock dots.
+  Used for the desktop window, Linux launcher and website favicon.
+
+The three dots represent the flock and belong with the wordmark.
+Beige surfaces, violet primary accents and blue secondary accents form the palette.
+
+## Names and compatibility
+
+Executables, desktop registration, environment variables and `jotflock://join/`
+links use the Jotflock name. Invitation signatures and the transport identifier
+also use this identity.
+
+After the identity change, existing device keys and board files remain usable.
+Fresh invitations are required. Current membership records live in
+`network/access/`. Previous records retain the board's authority root so a
+returning device can rejoin with a fresh grant. Previous links and grants cannot
+authorize admission.
+
+Code — [wordmark](../../src/app_ui.rs), [compact SVG](../../assets/jotflock.svg),
+[sharing.rs](../../src/sharing.rs).

@@ -226,8 +226,7 @@ mod tests {
         let root = dir.path().join("boards");
         let mut ws = Workspace::load(root.clone())?;
         ws.dirty = true;
-        // A directory at the temporary-file path forces a real filesystem failure.
-        fs::create_dir(root.join(format!("{}.tmp", ws.board().unwrap().id())))?;
+        fs::create_dir(root.join(format!("{}.bak", ws.board().unwrap().id())))?;
         assert!(ws.close(0).is_err());
         assert!(ws.board().is_some());
         assert!(ws.dirty);

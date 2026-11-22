@@ -1,112 +1,48 @@
-# Current architecture of Jotflock
+# Jotflock architecture decisions
 
-This directory records the implemented architecture. Keep this overview and the
-relevant numbered ADR current with every architecture-affecting change; record
-future capabilities as planned rather than presenting them as implemented.
+For example, a board can be edited offline on Windows or Linux, then shared with
+an invited teammate in a live encrypted session. Each editor retains a local copy.
+
+These ADRs describe the current implementation. Update the relevant decision when
+behavior changes. Keep setup instructions and validation commands in the
+[app README](../../README.md).
 
 ## Decisions
 
-- [0001 — Native local-first desktop foundation](0001-native-local-first-foundation.md)
-- [0002 — Canvas objects, frame membership and attached connectors](0002-canvas-object-foundation.md)
-- [0003 — Core invariants and generated testing](0003-core-invariants-and-generated-testing.md)
-- [0004 — Live-session availability](0004-live-session-availability.md)
-- [0005 — Useful templates and structured story maps](0005-structured-templates.md)
-- [0006 — Authenticated iroh sessions](0006-authenticated-iroh-sessions.md)
-- [0007 — Home and canvas](0007-home-and-canvas.md)
-- [0008 — Jotflock project identity](0008-jotflock-identity.md)
-- [0009 — Application commands and headless mode](0009-command-interface.md)
+| ADR | Topic |
+| --- | --- |
+| [0001](0001-native-local-first-foundation.md) | Native desktop and local storage |
+| [0002](0002-canvas-object-foundation.md) | Canvas objects, frames and connectors |
+| [0003](0003-core-invariants-and-generated-testing.md) | Document invariants and generated tests |
+| [0004](0004-live-session-availability.md) | Live-session availability |
+| [0005](0005-structured-templates.md) | Templates and story maps |
+| [0006](0006-authenticated-iroh-sessions.md) | Authentication, replication and transport |
+| [0007](0007-home-and-canvas.md) | Home and canvas interaction |
+| [0008](0008-jotflock-identity.md) | Full wordmark and compact mark |
+| [0009](0009-command-interface.md) | Commands and headless mode |
 
-## Runtime and modules
+## Code map
 
-`main.rs` owns the shared desktop and headless application lifecycle, board
-library, panels and save feedback. `command.rs` parses and dispatches commands.
-`terminal.rs` renders the command bar and keeps recent commands and responses.
-`interface.rs` owns typography, icons, adaptive dialogs and board previews.
-Board titles and object text can be edited in place. The drawing rail stays
-visible and selection properties open on demand.
-`workspace.rs` owns board open/close/create/delete lifecycle and session state.
-`scene.rs` owns canvas interaction state, rendering order, selection and connection
-creation. `card.rs` draws and interacts with an individual object. `geometry.rs`
-contains GUI-independent world-space bounds, connector anchors and hit testing.
-`document.rs` owns Automerge schema, read models and editing operations.
-`storage.rs` owns filesystem persistence and recoverable board deletion.
-`templates.rs` composes useful layouts; `story_map.rs` derives structured placement
-from stable activity/release identities. `sharing.rs` owns signed membership and
-invitations; `network.rs` owns the Tokio worker, authenticated iroh mesh and bounded
-synchronization. `desktop.rs` owns the profile lock, Unix command socket,
-single-instance invitation forwarding and Linux URL registration.
-`property_tests.rs` is compiled only for tests and exercises generated document,
-replica and workspace sequences against the invariants in ADR 0003. Synthetic
-compatibility bytes live in `tests/fixtures/`; failing-input seeds are retained in
-`proptest-regressions/`.
+| Area | Modules |
+| --- | --- |
+| Controller and desktop UI | `main.rs`, `app_ui.rs`, `interface.rs` |
+| Commands | `terminal.rs`, `command.rs` |
+| Canvas and layout | `scene.rs`, `card.rs`, `geometry.rs`, `templates.rs`, `story_map.rs` |
+| Documents and storage | `document.rs`, `workspace.rs`, `storage.rs` |
+| Sharing and local IPC | `sharing.rs`, `network.rs`, `desktop.rs` |
 
-```mermaid
-flowchart TD
-    Terminal[Command bar] --> Commands[Application commands]
-    Shell[Shell CLI] --> Commands
-    Commands --> App[Desktop or headless application]
-    App --> Workspace[Board lifecycle]
-    App --> Scene[Canvas scene and inspector]
-    App --> Templates[Templates and story layout]
-    App --> Network[Background iroh session]
-    Network --> Auth[Signed membership]
-    Network --> Replica[Worker replica]
-    Replica --> Document
-    Templates --> Document
-    Scene --> Widget[Object widget]
-    Scene --> Geometry[World geometry]
-    Scene --> Document[Automerge document]
-    Workspace --> Document
-    Workspace --> Storage[Local storage]
-    Storage --> Files[Board files, session and trash]
-```
+## Release boundaries
 
-## Persisted state
+The build workflow packages Linux AppImages and portable Windows executables.
+Build artifacts alone do not establish platform compatibility. Windows runtime,
+Linux distribution compatibility and connections across separate physical networks
+still need release validation.
 
-Each board is a schema-versioned Automerge file, with a `.bak` copy of its previous
-saved version. A separate atomic `session.json` stores open board IDs and the active
-board ID. The editor name is stored in `editor-name.txt`. Deleting a board archives its current file under `trash/`; closing saves
-it and retains it in the library. `JOTFLOCK_DATA_DIR` overrides the data directory.
-Object/connector IDs are stable; selection, pan, zoom, text focus and incomplete
-connections remain local UI state. Schema 1 boards load into schema 2 with defaults;
-unsupported versions fail explicitly. See ADR 0002 for migration and object rules.
+Known limitations include synchronous board saving, growing CRDT history, linear
+document scans and unmeasured large-board performance. Undo/redo, multi-selection,
+nested frames, images, PNG export and portable board archives are pending.
+Sharing assumes trusted editors. Member removal, key rotation and encrypted local
+storage are pending. Unix provides command forwarding and persistent headless mode.
 
-## Accepted networking design
-
-The first collaborative release will use live sessions: new participants need an
-authorized online peer offering the board. Existing members can use saved replicas
-offline and synchronize when connected again. No central board store or always-on
-replica is planned for that release. Every admitted editor may invite and admit
-new editors; the creator need not remain online. Join invitations expire after
-24 hours; admitted members retain access, and any editor may issue a fresh link.
-Signed membership, cached peer discovery, admission and expiry enforcement are
-implemented in ADR 0006. Early invitation cancellation and member removal remain
-future work. Presence is transient, with names/cursors/selections expiring after
-three seconds of silence. See the ADR for trust assumptions and limitations.
-
-## Boundaries and known limitations
-
-Encrypted live sessions and structured templates are implemented. SQLite, background
-board storage, undo/redo, multi-selection, general clipboard, nested frames, custom
-styles, advanced connector routing/reattachment and axis deletion remain pending.
-Board materialization and hit-testing are linear scans; the 5,000-object performance
-target is unverified. Presence and network state are separate from durable board
-content; saved local changes are not a claim of global durable delivery.
-
-Automerge 0.12 is used for document state; Proptest 1.12 is a development-only test
-dependency. The earlier dependency's no-op-edit/merge panic has a focused regression
-test, and a file generated by version 0.7.4 checks backward compatibility.
-
-Document creation/editing validates numeric inputs before mutation. Frame movement
-preflights all member translations before writing. Load and filesystem save validate
-live object geometry/text-object types. Connector operations enforce their object
-kind, and the read model hides self-loops as well as invalid/deleted endpoints.
-Failed pre-commit session writes during open/close restore local open/active state.
-See ADR 0003 for exact scopes and the remaining filesystem transaction limitations.
-
-Linux builds produce an AppImage using `package-appimage.sh`. Generated tests,
-headless egui interaction tests, focused regressions, compatibility checks,
-real multi-endpoint iroh tests, explicit relay-only verification, formatting,
-Clippy and release packaging are the current checks. Desktop command parity
-and synchronization between two headless instances were checked on Linux.
-Cross-distribution testing remains pending.
+The static website lives in `html/`. Its header and footer use the full wordmark.
+Desktop Home uses that mark too. Launchers and the favicon use the compact mark.

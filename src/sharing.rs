@@ -7,7 +7,6 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -217,27 +216,7 @@ pub struct Authorization {
     pub peers: Vec<Peer>,
 }
 pub fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(tmp, path)?;
-    Ok(())
+    crate::storage::write_atomic(path, bytes)
 }
 pub fn load_key(root: &Path) -> Result<SecretKey> {
     let folder = root.join("network");

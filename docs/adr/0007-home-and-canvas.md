@@ -1,20 +1,31 @@
 # ADR 0007 — Home and canvas
 
-Home shows open and saved boards. Click a preview to open the board or its title
-to rename it. The editor header uses the same title field. Board previews are
-cached locally. Document edits and incoming changes invalidate the preview.
+Status: Implemented.
 
-Each tile has a share icon to copy its invitation and a three-dot settings menu
-for the board name, editor name, invitations, closing and deletion. The editor
-name is a local preference shared across boards.
+## Decision
 
-Template previews create a board on Home or insert a layout in the editor. The
-canvas tool strip uses icons with hover labels. Select an object to open its
-properties from the bottom bar. Click object text or connector labels to edit.
-Drag cards to move them. Pinch or scroll to zoom around the pointer.
+Use Home as the board library and a separate canvas editor.
 
-Dialogs size to the window and scroll on short displays. Background controls
-pause while a dialog is open.
+For example, click a board preview to open it and click its title to rename it.
+Each tile offers an invitation button and a settings menu. Previews are cached
+locally and invalidated by document changes.
 
-Returning Home keeps the live session open. Switching boards ends the previous
-session on this device. Multiple editors can use the same valid invitation.
+## Interaction
+
+- Create a blank board or choose a template on Home. In the editor, insert a
+  template beside existing content.
+- Use the icon rail for canvas tools and object properties for the selection.
+- Click object text or arrow labels to edit. Drag cards to move them, use the
+  resize handle for free objects, and pinch or scroll to zoom around the pointer.
+- Dialogs adapt to the window and scroll on short displays. They block background
+  controls while open.
+- The editor name is a local preference shared across boards.
+- Window close saves pending edits first. A failed save keeps the window open
+  and reports the error.
+- Linux disables swap interval pacing so presentation to a hidden workspace
+  cannot block the window event loop.
+- Returning Home keeps sharing active. Switching boards ends the previous session
+  on this device.
+
+Code — [app_ui.rs](../../src/app_ui.rs), [interface.rs](../../src/interface.rs),
+[card.rs](../../src/card.rs), [scene.rs](../../src/scene.rs).

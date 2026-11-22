@@ -343,7 +343,8 @@ proptest! {
     fn session_write_failure_does_not_close_board(content in text()) {
         let dir=tempfile::tempdir().unwrap(); let mut ws=Workspace::load(dir.path().into()).unwrap();
         ws.board_mut().unwrap().add(Kind::Sticky,&content,0.,0.).unwrap(); ws.dirty=true;
-        std::fs::create_dir(dir.path().join("session.tmp")).unwrap();
+        std::fs::rename(dir.path().join("session.json"), dir.path().join("session.previous")).unwrap();
+        std::fs::create_dir(dir.path().join("session.json")).unwrap();
         prop_assert!(ws.close(0).is_err());
         prop_assert!(ws.board().is_some()); prop_assert!(ws.entries[0].open);
         prop_assert_eq!(&ws.board().unwrap().cards()[0].text,&content);
@@ -422,12 +423,17 @@ fn failed_session_updates_restore_open_and_active_state() {
     ws.create().unwrap();
     ws.close(0).unwrap();
     let active = ws.board().unwrap().id();
-    std::fs::create_dir(dir.path().join("session.tmp")).unwrap();
+    let session = dir.path().join("session.json");
+    let previous = dir.path().join("session.previous");
+    std::fs::rename(&session, &previous).unwrap();
+    std::fs::create_dir(&session).unwrap();
     assert!(ws.open(0).is_err());
     assert!(!ws.entries[0].open);
     assert!(ws.close(1).is_err());
     assert!(ws.entries[1].open);
     assert_eq!(ws.board().unwrap().id(), active);
+    std::fs::remove_dir(&session).unwrap();
+    std::fs::rename(&previous, &session).unwrap();
     let reloaded = Workspace::load(dir.path().into()).unwrap();
     assert_eq!(reloaded.board().unwrap().id(), active);
     assert!(

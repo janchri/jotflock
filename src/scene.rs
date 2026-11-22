@@ -68,6 +68,10 @@ impl Scene {
         self.zoom_at(self.viewport * 0.5, factor)
     }
     pub fn zoom_at(&mut self, anchor: Vec2, factor: f32) -> Result<bool> {
+        ensure!(
+            factor.is_finite() && factor > 0. && anchor.is_finite(),
+            "Invalid zoom input"
+        );
         let next = (self.zoom * factor).clamp(0.1, 2.);
         if next == self.zoom {
             return Ok(false);
@@ -108,25 +112,27 @@ impl Scene {
         if cards.is_empty() {
             return;
         }
-        let min = Vec2::new(
-            cards.iter().map(|c| c.x).fold(f32::INFINITY, f32::min),
-            cards.iter().map(|c| c.y).fold(f32::INFINITY, f32::min),
-        );
-        let max = Vec2::new(
-            cards
-                .iter()
-                .map(|c| c.x + c.width)
-                .fold(f32::NEG_INFINITY, f32::max),
-            cards
-                .iter()
-                .map(|c| c.y + c.height)
-                .fold(f32::NEG_INFINITY, f32::max),
-        );
-        let size = max - min;
-        self.zoom = ((self.viewport.x - 60.) / size.x.max(1.))
-            .min((self.viewport.y - 60.) / size.y.max(1.))
+        let min_x = cards
+            .iter()
+            .map(|c| c.x as f64)
+            .fold(f64::INFINITY, f64::min);
+        let min_y = cards
+            .iter()
+            .map(|c| c.y as f64)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = cards
+            .iter()
+            .map(|c| c.x as f64 + c.width as f64)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = cards
+            .iter()
+            .map(|c| c.y as f64 + c.height as f64)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let zoom = ((self.viewport.x as f64 - 60.) / (max_x - min_x).max(1.))
+            .min((self.viewport.y as f64 - 60.) / (max_y - min_y).max(1.))
             .clamp(0.1, 2.);
-        self.pan = Vec2::splat(30.) - min * self.zoom;
+        self.zoom = zoom as f32;
+        self.pan = egui::vec2((30. - min_x * zoom) as f32, (30. - min_y * zoom) as f32);
     }
     fn screen(&self, world: [f32; 2], origin: Pos2) -> Pos2 {
         origin + self.pan + Vec2::new(world[0], world[1]) * self.zoom
@@ -271,18 +277,17 @@ impl Scene {
                     board.cards().into_iter().map(|c| (c.id, c.text)).collect();
                 for (column, ids) in [(true, axes.columns), (false, axes.lanes)] {
                     for (i, header) in ids.iter().enumerate() {
-                        ui.horizontal(|ui| {
+                        ui.horizontal(|ui| -> Result<()> {
                             ui.label(labels.get(header).map(String::as_str).unwrap_or("Untitled"));
                             for (label, delta) in [("↑", -1), ("↓", 1)] {
-                                if ui.small_button(label).clicked()
-                                    && self
-                                        .edit_gui(board, Edit::AxisMove(&id, column, i, delta))
-                                        .is_ok()
-                                {
+                                if ui.small_button(label).clicked() {
+                                    self.edit_gui(board, Edit::AxisMove(&id, column, i, delta))?;
                                     changed = true;
                                 }
                             }
-                        });
+                            Ok(())
+                        })
+                        .inner?;
                     }
                 }
             }
@@ -629,6 +634,22 @@ pub fn connector_points(from: &Card, to: &Card) -> ([f32; 2], [f32; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fitting_extreme_coordinates_keeps_view_finite() -> Result<()> {
+        let mut board = Board::new()?;
+        board.add(Kind::Sticky, "Left", -f32::MAX, 0.)?;
+        board.add(Kind::Sticky, "Right", f32::MAX, 0.)?;
+        let mut scene = Scene::default();
+        scene.fit(&board);
+        assert!(scene.zoom.is_finite());
+        assert!(scene.pan.is_finite());
+        let before = (scene.zoom, scene.pan);
+        for factor in [f32::NAN, f32::INFINITY, 0., -1.] {
+            assert!(scene.zoom_at(Vec2::ZERO, factor).is_err());
+        }
+        assert_eq!((scene.zoom, scene.pan), before);
+        Ok(())
+    }
     fn frame(
         ctx: &egui::Context,
         scene: &mut Scene,

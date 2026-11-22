@@ -193,7 +193,10 @@ impl Board {
             .ok_or_else(|| anyhow!("Not a story map"))?;
         let mut ids = if column { axes.columns } else { axes.lanes };
         ensure!(index < ids.len(), "Unknown axis");
-        let next = (index as isize + delta).clamp(0, ids.len() as isize - 1) as usize;
+        let next = index.saturating_add_signed(delta).min(ids.len() - 1);
+        if next == index {
+            return Ok(());
+        }
         ids.swap(index, next);
         let (_, obj) = self
             .doc

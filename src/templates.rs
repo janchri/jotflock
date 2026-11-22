@@ -176,6 +176,36 @@ pub fn insert(board: &mut Board, template: usize) -> Result<String> {
 mod tests {
     use super::*;
     #[test]
+    fn axis_reordering_handles_extreme_offsets_and_skips_boundary_noops() -> Result<()> {
+        let mut board = Board::new()?;
+        let map = insert(&mut board, 2)?;
+        let original = board.story_axes(&map).unwrap().columns;
+        let heads = board.doc.get_heads();
+        board.move_axis(&map, true, 0, isize::MIN)?;
+        assert_eq!(board.doc.get_heads(), heads);
+        board.move_axis(&map, true, 0, isize::MAX)?;
+        let reordered = board.story_axes(&map).unwrap().columns;
+        assert_eq!(reordered.last(), original.first());
+        let heads = board.doc.get_heads();
+        board.move_axis(&map, true, reordered.len() - 1, 1)?;
+        assert_eq!(board.doc.get_heads(), heads);
+        Ok(())
+    }
+    #[test]
+    fn story_projection_cannot_hide_invalid_saved_geometry() -> Result<()> {
+        let mut board = Board::new()?;
+        let map = insert(&mut board, 2)?;
+        let header = board.story_axes(&map).unwrap().columns[0].clone();
+        let (_, obj) = board.doc.get(ROOT, &header)?.unwrap();
+        board.doc.put(&obj, "width", f64::NAN)?;
+        assert!(board.validate().is_err());
+        assert!(Board::load(&board.save()).is_err());
+        board.doc.put(&obj, "width", "invalid")?;
+        assert!(board.validate().is_err());
+        assert!(Board::load(&board.save()).is_err());
+        Ok(())
+    }
+    #[test]
     fn architecture_has_attached_labeled_relationships() -> Result<()> {
         let mut b = Board::new()?;
         insert(&mut b, 1)?;

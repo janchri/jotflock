@@ -120,7 +120,6 @@ enum Command {
         local: Option<Vec<u8>>,
     },
     Publish(Vec<u8>),
-    Invite,
     Refresh,
     Stop,
     Shutdown,
@@ -162,7 +161,6 @@ impl Network {
                                         Command::Share { epoch, bytes } => hub.share(epoch, bytes).await,
                                         Command::Join { epoch, ticket, local } => hub.join(epoch, *ticket, local).await,
                                         Command::Publish(bytes) => hub.publish(bytes).await,
-                                        Command::Invite => hub.invitation().await.map(|_| ()),
                                         Command::Refresh => {
                                             if let Some(room) = hub.room.read().await.clone() {
                                                 room.last_heads.lock().await.clear();
@@ -220,15 +218,14 @@ impl Network {
         self.presence.send_replace(presence);
     }
     pub fn share(&mut self, id: String, bytes: Vec<u8>) -> Result<()> {
-        if self.board.as_ref() == Some(&id) {
-            self.tx.try_send(Command::Publish(bytes))?;
-            self.tx.try_send(Command::Invite)?;
+        let epoch = if self.board.as_ref() == Some(&id) {
+            self.epoch
         } else {
-            let epoch = self.epoch + 1;
-            self.tx.try_send(Command::Share { epoch, bytes })?;
-            self.epoch = epoch;
-            self.board = Some(id);
-        }
+            self.epoch + 1
+        };
+        self.tx.try_send(Command::Share { epoch, bytes })?;
+        self.epoch = epoch;
+        self.board = Some(id);
         Ok(())
     }
     pub fn join(&mut self, ticket: Invitation, local: Option<Vec<u8>>) -> Result<()> {
@@ -375,6 +372,12 @@ impl Hub {
         })
     }
     async fn share(self: &Arc<Self>, epoch: u64, bytes: Vec<u8>) -> Result<()> {
+        let current = self.room.read().await.clone();
+        if current.as_ref().is_some_and(|room| room.epoch == epoch) {
+            self.publish(bytes).await?;
+            self.invitation().await?;
+            return Ok(());
+        }
         ensure!(
             bytes.len() <= MAX_DOC,
             "Board exceeds the 4 MiB sharing limit"
@@ -556,13 +559,13 @@ impl Hub {
     async fn publish(&self, bytes: Vec<u8>) -> Result<()> {
         ensure!(bytes.len() <= MAX_DOC, "Board exceeds sharing limit");
         if let Some(room) = self.room.read().await.clone() {
-            let other = Board::load(&bytes)?;
+            let mut other = Board::load(&bytes)?;
             ensure!(other.id() == room.id, "Board identity mismatch");
             let mut doc = room.doc.lock().await;
             let mut candidate = Board {
                 doc: doc.doc.clone(),
             };
-            candidate.doc.merge(&mut other.doc.clone())?;
+            candidate.doc.merge(&mut other.doc)?;
             validate(&mut candidate, &room.id)?;
             *doc = candidate;
         }
@@ -683,6 +686,10 @@ impl Hub {
     }
     async fn register(&self, room: &Room, connection: &Connection) -> Result<()> {
         let mut map = room.connections.lock().await;
+        ensure!(
+            room.alive.load(Ordering::Acquire),
+            "Session has been closed"
+        );
         let id = connection.remote_id();
         if let Some(old) = map.get(&id) {
             let preferred = if self.endpoint.id() < id {
@@ -972,6 +979,34 @@ async fn remove_connection(room: &Room, connection: &Connection) {
 mod tests {
     use super::*;
     use crate::document::Kind;
+    #[test]
+    fn invitation_refresh_uses_one_queue_slot_and_full_queue_preserves_state() -> Result<()> {
+        let (tx, mut commands) = channel::channel(8);
+        for _ in 0..7 {
+            tx.try_send(Command::Refresh)?;
+        }
+        let (_, events) = mpsc::sync_channel(8);
+        let (presence, _) = tokio::sync::watch::channel(Presence::default());
+        let mut network = Network {
+            tx,
+            events,
+            epoch: 1,
+            board: Some("current".into()),
+            presence,
+        };
+        network.share("current".into(), vec![1, 2, 3])?;
+        assert!(network.share("other".into(), vec![]).is_err());
+        assert_eq!(network.epoch, 1);
+        assert_eq!(network.board.as_deref(), Some("current"));
+        for _ in 0..7 {
+            assert!(matches!(commands.try_recv()?, Command::Refresh));
+        }
+        assert!(
+            matches!(commands.try_recv()?, Command::Share { epoch: 1, bytes } if bytes == [1, 2, 3])
+        );
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
     struct Node {
         hub: Arc<Hub>,
         _dir: tempfile::TempDir,
@@ -1070,6 +1105,11 @@ mod tests {
         host.wait_cards(4).await?;
         first.wait_cards(4).await?;
         second.wait_cards(4).await?;
+        let room = host.room().await;
+        let latest = room.doc.lock().await.save();
+        host.hub.share(room.epoch, latest).await?;
+        assert!(Arc::ptr_eq(&room, &host.room().await));
+        assert_eq!(room.connections.lock().await.len(), 2);
         host.close().await;
         first.close().await;
         second.close().await;
