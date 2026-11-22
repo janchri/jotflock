@@ -12,7 +12,7 @@ jobs:
     name: Linux AppImage
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -37,7 +37,7 @@ jobs:
         run: ./package-appimage.sh
         env:
           LINUXDEPLOY: ./linuxdeploy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jotflock-linux-x86_64
           path: jotflock-x86_64.AppImage
@@ -47,11 +47,11 @@ jobs:
     name: Windows portable executable
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build executable
         run: cargo build --release --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jotflock-windows-x86_64
           path: target/release/jotflock.exe
