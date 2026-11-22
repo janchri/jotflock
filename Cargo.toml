@@ -1,6 +1,6 @@
 [package]
 name = "jotflock"
-version = "0.3.0"
+version = "0.3.0-alpha.1"
 edition = "2021"
 description = "A native, local-first collaborative whiteboard"
 

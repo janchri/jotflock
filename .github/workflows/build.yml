@@ -8,8 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  validate-version:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        if: startsWith(github.ref, 'refs/tags/')
+      - uses: dtolnay/rust-toolchain@stable
+        if: startsWith(github.ref, 'refs/tags/')
+      - name: Check tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cargo_version=$(cargo metadata --locked --no-deps --format-version 1 | \
+            python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "jotflock"))')
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != v* || "$tag_version" != "$cargo_version" ]]; then
+            echo "Tag '$GITHUB_REF_NAME' must be v$cargo_version to match Cargo.toml."
+            exit 1
+          fi
+
   linux:
     name: Linux AppImage
+    needs: validate-version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -45,6 +65,7 @@ jobs:
 
   windows:
     name: Windows portable executable
+    needs: validate-version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,3 +77,48 @@ jobs:
           name: jotflock-windows-x86_64
           path: target/release/jotflock.exe
           if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [validate-version, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v8
+        with:
+          name: jotflock-linux-x86_64
+          path: dist/linux
+      - name: Download Windows executable
+        uses: actions/download-artifact@v8
+        with:
+          name: jotflock-windows-x86_64
+          path: dist/windows
+      - name: Publish GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv dist/linux/jotflock-x86_64.AppImage dist/jotflock-linux-x86_64.AppImage
+          mv dist/windows/jotflock.exe dist/jotflock-windows-x86_64.exe
+          version="${GITHUB_REF_NAME#v}"
+          assets=(
+            dist/jotflock-linux-x86_64.AppImage
+            dist/jotflock-windows-x86_64.exe
+          )
+          release_flags=()
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber "${assets[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "Jotflock $version" \
+              --notes "See the project README for setup and current limitations." \
+              "${release_flags[@]}" \
+              "${assets[@]}"
+          fi
